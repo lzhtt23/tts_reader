@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 镰锤 + 书（2026-10-18 起作为默认启动图标） -->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/ic_launcher_paper" />
+    <foreground android:drawable="@mipmap/ic_launcher_sickle_foreground" />
+    <monochrome android:drawable="@mipmap/ic_launcher_sickle_monochrome" />
+</adaptive-icon>

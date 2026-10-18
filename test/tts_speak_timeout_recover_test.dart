@@ -78,33 +78,29 @@ void main() {
     expect(tts.speakTimeoutStreak, 2, reason: '第二次仍然超时 → 计数继续累积');
   });
 
-  test('连续超时后重试只等 speakTimeout/3，不再重复等满一整个 speakTimeout', () async {
+  test('★等待上限按字数给：长句不会被固定的 30 秒误判成「引擎不回应」', () {
     final TtsManager tts = TtsManager.instance;
-    final _HangingEngine engine = _HangingEngine();
-    await tts.registerEngine(engine, makeActive: true);
+    tts.resetTimeouts(); // 生产默认值
 
-    // 生产值 30 秒 → 重试上限 10 秒。用例里按比例压到 4 秒 → 1.32 秒，
-    // 判据仍然可分辨（不压的话第二次要等满 4 秒）。
-    tts.speakTimeout = const Duration(seconds: 4);
-    tts.speakLines(<String>['卡住的一句']);
-    await tts.whenSessionFinished().timeout(
-          const Duration(seconds: 10),
-          onTimeout: () => fail('第一次朗读没有收尾'),
-        );
-    expect(tts.speakTimeoutStreak, 1);
+    // 真机 2026-10-18：`Bad state: 本地 TTS · multitts 朗读超时（30 秒无响应）`，
+    // 而同一本书里有 21 秒才读完的句子；100 字上下的中文句正常要 35~40 秒。
+    final short = tts.debugSpeakBudgetFor('短句');
+    final medium = tts.debugSpeakBudgetFor('字' * 60);
+    final long = tts.debugSpeakBudgetFor('字' * 120);
 
-    // 第二次：只等 speakTimeout/3，必须明显比第一次快
-    final Stopwatch watch = Stopwatch()..start();
-    tts.speakLines(<String>['卡住的一句']);
-    await tts.whenSessionFinished().timeout(
-          const Duration(seconds: 10),
-          onTimeout: () => fail('第二次朗读没有收尾'),
-        );
-    watch.stop();
+    expect(short.inSeconds, greaterThanOrEqualTo(15), reason: '下限 15 秒，短句不该被掐');
+    expect(medium.inSeconds, greaterThanOrEqualTo(30),
+        reason: '★60 字的一句念完约 17 秒，固定 30 秒的判据余量太小');
+    expect(long.inSeconds, greaterThanOrEqualTo(50),
+        reason: '★120 字要 35~40 秒 —— 固定 30 秒必然误判，这就是真机那条报错的来源');
+    expect(long.inSeconds, lessThanOrEqualTo(90), reason: '不能无限等：引擎真死也要收尾');
+  });
 
-    expect(watch.elapsed, lessThan(const Duration(milliseconds: 2500)),
-        reason: '★第一次超时已经证明插件不回应，重试不能再等满 speakTimeout：'
-            '真机症状就是「同一位置连续两次卡死、每次 30 秒」');
+  test('测试显式改过 speakTimeout 时以覆盖值为准（否则上千条用例会被拖慢）', () {
+    final TtsManager tts = TtsManager.instance;
+    tts.speakTimeout = const Duration(milliseconds: 120);
+    expect(tts.debugSpeakBudgetFor('字' * 500).inMilliseconds, 120);
+    tts.resetTimeouts();
   });
 
   test('引擎恢复回应 → 健康度清零，下次照常等 speakTimeout', () async {

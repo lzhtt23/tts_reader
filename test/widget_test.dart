@@ -9,6 +9,7 @@ import 'package:syncfusion_flutter_pdfviewer/pdfviewer.dart';
 import 'package:tts_reader/main.dart';
 import 'package:tts_reader/models/document.dart';
 import 'package:tts_reader/models/structured_document.dart';
+import 'package:tts_reader/pages/home_page.dart';
 import 'package:tts_reader/pages/reader_page.dart';
 import 'package:tts_reader/pages/settings_page.dart';
 import 'package:tts_reader/services/storage_service.dart';
@@ -71,7 +72,8 @@ void main() {
     // 文档卡片：类型 + 进度
     expect(find.text('示例文档'), findsOneWidget);
     expect(find.text('PDF · 进度 25%'), findsOneWidget);
-    expect(find.text('导入文件'), findsOneWidget);
+    // 导入键：2026-10-18 从右下角悬浮按钮挪到搜索行右侧的方形按钮
+    expect(find.byKey(HomePage.importButtonKey), findsOneWidget);
 
     // 未访问过的 Tab 不构建（懒加载，避免启动即初始化 WebView）
     expect(find.byType(SettingsPage), findsNothing);

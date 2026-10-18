@@ -67,6 +67,14 @@ class TtsManager extends ChangeNotifier implements AudioSessionSource {
   bool _paused = false;
   bool _oneShot = false;
 
+  /// 用户是否刚刚**主动结束**了朗读（[stop] 置真，播放/重新载入文档清掉）
+  ///
+  /// 为什么需要它：`stop()` 之后 `_endSession()` 故意保留 `_doc`（记进度用），
+  /// 于是 `hasSession` 仍为 true —— 只按 `hasSession` 判断显示的话，
+  /// 阅读页按下方块键结束朗读后，文档库那条迷你条会一直挂着不消失。
+  bool _endedByStop = false;
+  bool get endedByStop => _endedByStop;
+
   /// 纯文本队列（网页朗读等场景），与结构化文档游标互不影响
   List<String> _lines = const <String>[];
   int _lineIndex = 0;
@@ -520,6 +528,8 @@ class TtsManager extends ChangeNotifier implements AudioSessionSource {
     terminateForDocumentSwitch(nextDocumentId: documentId);
     _doc = document;
     _plainMode = false;
+    // 换书/重新载入 = 新的一场朗读，清掉「刚结束」标记
+    _endedByStop = false;
     // ★v1.21.63：**绑定文档时必须清掉"借声残留"**。
     //
     // 真机（2026-10-17 15:50，决定性证据）：
@@ -903,6 +913,8 @@ class TtsManager extends ChangeNotifier implements AudioSessionSource {
       resume();
       return;
     }
+    // 用户又开始读了：清掉「刚结束朗读」标记，迷你条重新出现
+    _endedByStop = false;
     if (_plainMode && _lines.isNotEmpty) {
       speakLines(_lines, start: _lineIndex);
       return;
@@ -1298,6 +1310,8 @@ class TtsManager extends ChangeNotifier implements AudioSessionSource {
 
   /// 从指定坐标开始朗读（章、段、句）
   void speakFrom(int chapter, int paragraph, int sentence) {
+    // 又要开始读了：清掉「刚被用户结束」标记（迷你条据此决定显示与否）
+    _endedByStop = false;
     // 跳动检测：这是一次用户显式「点句」，随之而来的推进不算异常跳跃
     SpeechDiagnostics.instance.markUserAction('点句');
     // ⚠️ **同步**记下意图（§4.102）：`_restart` 只是发起，真实游标要等
@@ -1400,6 +1414,11 @@ class TtsManager extends ChangeNotifier implements AudioSessionSource {
   }
 
   /// 停止朗读（游标保持在当前位置）
+  ///
+  /// ⚠️ **不要在这里置 `_endedByStop`**：`stop()` 会被「换书 / 注册引擎 / 起读」
+  /// 等内部路径调用，置标记会让文档库迷你条在正常朗读时也不显示
+  /// （用户报的「第一次打开文档开始朗读、退回文档库迷你条不显示，第二次才显示」）。
+  /// 只有用户**明确按下方块键**时才走 [stopByUser]。
   Future<void> stop() async {
     AutoSleepController.instance.notifyUserActivity();
     _generation++;
@@ -1427,6 +1446,20 @@ class TtsManager extends ChangeNotifier implements AudioSessionSource {
     _fireControl(_activeEngine.stop());
     // 停止 / 结束朗读就交还音频焦点
     unawaited(MediaInterruptionController.instance.releaseFocus());
+  }
+
+  /// **用户主动结束朗读**（阅读页/文档库的方块键走这里）
+  ///
+  /// 与 [stop] 的唯一区别：多置一个 [endedByStop] 标记，让文档库那条迷你条
+  /// 整条消失 —— `_endSession()` 故意保留 `_doc`（记进度用），`hasSession`
+  /// 停完仍为真，只看它的话迷你条会一直挂着。
+  ///
+  /// 标记在「又点播放 / 点句 / 重新载入文档」时清掉。
+  Future<void> stopByUser() async {
+    _endedByStop = true;
+    await stop();
+    _endedByStop = true; // stop() 内部会 _notify，这里再补一次让界面收到新状态
+    _notify();
   }
 
   /// 结束整场朗读**并放掉当前内容**：控制栏随之整个收起
@@ -1491,6 +1524,8 @@ class TtsManager extends ChangeNotifier implements AudioSessionSource {
     int start = 0,
     required bool claimAudio,
   }) {
+    // 开始新一轮朗读：清掉「刚被用户结束」标记
+    _endedByStop = false;
     AutoSleepController.instance.notifyUserActivity();
     final items = <String>[];
     for (final line in lines) {
@@ -1808,20 +1843,28 @@ class TtsManager extends ChangeNotifier implements AudioSessionSource {
   @visibleForTesting
   int get speakTimeoutStreak => _speakTimeouts;
 
-  /// 引擎已经被判「不回应」之后，重试单句最多等 `speakTimeout / 3`。
+  /// 单句朗读的等待上限：**按字数给，不是固定 30 秒**。
   ///
-  /// 原来第一次超时后什么都不变 —— 用户再按一次播放会**原样再卡满 30 秒**，
-  /// 真机表现就是「同一位置连续两次卡死，每次 30 秒」。
+  /// 真机截图（2026-10-18）：`Bad state: 本地 TTS · multitts 朗读超时（30 秒无响应）`
+  /// —— 但同一本书的日志里有 **21 秒**才读完的句子（15:40:59→15:41:20），
+  /// 而这类长句（100 字上下）正常要 35~40 秒才念得完。固定 30 秒的判据
+  /// 必然把它误判成「引擎不回应」，用户看到的就是朗读被硬生生掐断。
   ///
-  /// 取 1/3 而不是固定值：生产值 30 秒 → 10 秒（够一句正常长句读完，不会再误判），
-  /// 而测试里把 [speakTimeout] 调小后上限跟着变小，用例才跑得动。
-  /// 下限 [minRetrySpeakTimeout] 只防「0 秒」这种退化值。
-  static const Duration minRetrySpeakTimeout = Duration(milliseconds: 300);
-
-  Duration get _retrySpeakTimeout {
-    final Duration scaled = speakTimeout * 0.33;
-    return scaled > minRetrySpeakTimeout ? scaled : minRetrySpeakTimeout;
+  /// 口径：8 秒起步 + 每字 400ms，夹在 15~90 秒之间。
+  /// （正常语速约 3.5~4 字/秒，400ms/字 留了约 1.5 倍余量。）
+  ///
+  /// ⚠️ 测试里显式改过 [speakTimeout] 时**以覆盖值为准**：那 1000+ 条用例
+  /// 靠把上限压到几百毫秒才能在毫秒级时间内跑完，这里不能把它们拖成十几秒。
+  Duration _speakBudgetFor(String text) {
+    if (speakTimeout != defaultSpeakTimeout) return speakTimeout;
+    final int chars = text.trim().length;
+    final int ms = 8000 + chars * 400;
+    return Duration(milliseconds: ms.clamp(15000, 90000));
   }
+
+  /// 只给测试看：给定文本的朗读等待上限
+  @visibleForTesting
+  Duration debugSpeakBudgetFor(String text) => _speakBudgetFor(text);
 
   // ---------------- 插件调用串行锁 ----------------
   //
@@ -2034,9 +2077,10 @@ class TtsManager extends ChangeNotifier implements AudioSessionSource {
 
   /// 朗读一个片段：插件不回复时按超时失败处理；被新的朗读打断时安静退出
   Future<void> _speakChunk(TtsEngine engine, String chunk, int token) async {
-    // 已经被判过「不回应」的引擎，重试时不再原样等满 speakTimeout：
-    // 用户按一次卡 30 秒、再按一次又卡 30 秒，是这条链上最刺眼的症状。
-    final Duration budget = _speakTimeouts > 0 ? _retrySpeakTimeout : speakTimeout;
+    // 上限按**这一句的字数**给：固定 30 秒会把长句误判成「引擎不回应」
+    // （见 [_speakBudgetFor]）。重试不再额外缩短——长度判据本身就是准确的，
+    // 真正 wedge 的引擎交给 [_onSpeakTimeout] 的重置链路处理。
+    final Duration budget = _speakBudgetFor(chunk);
     final ok = await _awt(
       () async {
         try {

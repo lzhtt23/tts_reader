@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:tts_reader/main.dart';
+import 'package:tts_reader/pages/home_page.dart';
 import 'package:tts_reader/services/document_service.dart';
 import 'package:tts_reader/services/library_storage.dart';
 import 'package:tts_reader/services/storage_service.dart';
@@ -101,7 +102,7 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 50));
 
-    await tester.tap(find.widgetWithText(FloatingActionButton, '导入文件'));
+    await tester.tap(find.byKey(HomePage.importButtonKey));
     for (var i = 0; i < 20; i++) {
       await tester.pump(const Duration(milliseconds: 50));
       await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 30)));
@@ -131,7 +132,7 @@ void main() {
     await tester.pumpWidget(const TtsReaderApp());
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 50));
-    await tester.tap(find.widgetWithText(FloatingActionButton, '导入文件'));
+    await tester.tap(find.byKey(HomePage.importButtonKey));
     for (var i = 0; i < 20; i++) {
       await tester.pump(const Duration(milliseconds: 50));
       await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 30)));

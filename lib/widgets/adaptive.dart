@@ -93,6 +93,10 @@ double readerMinPageMargin(BuildContext context) =>
 ({double top, double bottom}) readerPageVerticalPadding(BuildContext context) =>
     readerPageVerticalPaddingFor(MediaQuery.sizeOf(context));
 
+/// 阅读页是否按「平板画布」处理（D2 布局只在平板生效）
+bool readerIsTabletCanvas(BuildContext context) =>
+    _isTabletCanvas(MediaQuery.sizeOf(context));
+
 /// 内容居中并限制最大宽度
 ///
 /// 平板上最容易忽略的问题不是「显示不下」，而是**一行太长**：

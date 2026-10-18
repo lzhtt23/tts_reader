@@ -125,33 +125,35 @@ void main() {
     expect(find.byIcon(Icons.chevron_right), findsNothing);
   });
 
-  testWidgets('有会话时收起态是碟片，点一下在导入按钮左侧展开', (tester) async {
+  testWidgets('有会话时收起态只有封面，点一下向左展开成整条', (tester) async {
     loadDocument();
     await pumpBar(tester, onReturn: () async {});
 
-    // 收起态：没有任何控制按钮，只有碟片（自绘，用 tooltip 找）
+    // 收起态（2026-10-18 改）：只有一枚封面方块，没有任何文字和按钮
     expect(find.byTooltip('朗读已暂停 · 点击展开控制栏'), findsOneWidget);
+    expect(find.text('红楼梦 (曹雪芹)'), findsNothing);
     expect(find.byIcon(Icons.play_arrow), findsNothing);
+    expect(find.byIcon(Icons.fast_forward), findsNothing);
+    expect(find.byIcon(Icons.stop), findsNothing);
 
     await tester.tap(find.byTooltip('朗读已暂停 · 点击展开控制栏'));
     await tester.pumpAndSettle();
 
+    // 展开：一条里有 下一句 / 停止 / 播放 + 书名
     expect(find.byIcon(Icons.play_arrow), findsOneWidget);
     expect(find.byIcon(Icons.fast_forward), findsOneWidget);
-    expect(find.byIcon(Icons.my_location), findsOneWidget);
     expect(find.byIcon(Icons.stop), findsOneWidget);
-    expect(find.byIcon(Icons.chevron_right), findsOneWidget);
-    // 书名 + 当前章两行
     expect(find.text('红楼梦 (曹雪芹)'), findsOneWidget);
-    expect(find.text('第 1 章 测试章节'), findsOneWidget);
+    // 齿轮不再占键位：设置从底部导航进，位置让给「下一句」
+    expect(find.byIcon(Icons.settings), findsNothing);
 
     // 布局顺序：控制栏在「导入文件」左侧
     final barX = tester.getCenter(find.byIcon(Icons.play_arrow)).dx;
     final fabX = tester.getCenter(find.text('导入文件')).dx;
     expect(barX, lessThan(fabX), reason: '控制栏应当在导入按钮左侧');
 
-    // 收起
-    await tester.tap(find.byIcon(Icons.chevron_right));
+    // 收起：点封面，回到只剩封面
+    await tester.tap(find.byKey(ReadingControlBar.discKey));
     await tester.pumpAndSettle();
     expect(find.byIcon(Icons.play_arrow), findsNothing);
     expect(find.byTooltip('朗读已暂停 · 点击展开控制栏'), findsOneWidget);
@@ -206,9 +208,9 @@ void main() {
     await tester.tap(find.byTooltip('朗读已暂停 · 点击展开控制栏'));
     await tester.pumpAndSettle();
 
-    await tester.tap(find.byIcon(Icons.my_location));
+    await tester.tap(find.byKey(ReadingControlBar.returnKey));
     await tester.pump();
-    expect(returned, 1, reason: '书本按钮应当调用「返回朗读页」回调');
+    expect(returned, 1, reason: '书名那块应当调用「返回朗读页」回调');
 
     await tester.tap(find.byIcon(Icons.stop));
     await tester.pump();
@@ -227,6 +229,38 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('第 1 章 测试章节'), findsNothing);
     expect(find.byIcon(Icons.fast_forward), findsOneWidget);
+
+    await endSession(tester);
+  });
+
+  // 用户报的现象：第一次打开文档开始朗读、退回文档库，迷你条不显示；
+  // 再进一次才显示。根因是 stop() 内部路径（换书/注册引擎/起读）也会把
+  // 「刚被用户结束」的标记置真 —— 现在只有方块键（stopByUser）才置。
+  testWidgets('内部 stop 之后开始朗读：迷你条要显示', (tester) async {
+    loadDocument();
+    await pumpBar(tester, onReturn: () async {});
+    await tts.stop(); // 模拟内部收尾（换书 / 注册引擎都会走到）
+    await tester.pump();
+
+    tts.playFromCursor();
+    await expectEventually(tester, () => tts.playing, reason: '应当开始朗读');
+    expect(find.byTooltip('正在朗读 · 点击展开控制栏'), findsOneWidget);
+
+    await endSession(tester);
+  });
+
+  testWidgets('用户按方块键结束朗读后：迷你条整条消失', (tester) async {
+    loadDocument();
+    await pumpBar(tester, onReturn: () async {});
+    tts.playFromCursor();
+    await expectEventually(tester, () => tts.playing, reason: '应当开始朗读');
+    expect(find.byTooltip('正在朗读 · 点击展开控制栏'), findsOneWidget);
+
+    await tts.stopByUser();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 120));
+    expect(find.byKey(ReadingControlBar.discKey), findsNothing);
+    expect(find.byKey(ReadingControlBar.barKey), findsNothing);
 
     await endSession(tester);
   });

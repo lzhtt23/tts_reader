@@ -65,4 +65,29 @@ void main() {
       expect(pad.bottom, 120);
     });
   });
+
+  group('D2 布局开关', () {
+    testWidgets('★平板画布才启用 D2（右侧竖条控制栏）；手机不启用', (tester) async {
+      Future<bool> probe(Size size) async {
+        late bool value;
+        await tester.pumpWidget(
+          MediaQuery(
+            data: MediaQueryData(size: size),
+            child: Builder(builder: (context) {
+              value = readerIsTabletCanvas(context);
+              return const SizedBox.shrink();
+            }),
+          ),
+        );
+        return value;
+      }
+
+      expect(await probe(const Size(1280, 800)), isTrue);
+      expect(await probe(const Size(800, 1280)), isTrue);
+      expect(await probe(const Size(400, 800)), isFalse,
+          reason: '手机不能出现侧栏：会把正文挤没');
+      expect(await probe(const Size(900, 400)), isFalse,
+          reason: '横屏手机屏幕太矮，不算平板');
+    });
+  });
 }

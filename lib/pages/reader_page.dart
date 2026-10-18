@@ -74,6 +74,35 @@ double clampExtrapolateStep({
   return from + gap.sign * maxStep;
 }
 
+/// 一次跟随滚动结束后，怎么判定它的结局。
+///
+/// 为什么需要单独判：`animateTo` 被 `jumpTo` 打断时，它的 Future **也会正常完成**，
+/// 于是 `.then` 里看到的是「落点停在半路」。原来的判据只看误差，把这种
+/// 「被接管」和「撞界」混成一堆 —— 真机日志里就成了
+/// `47.493338 滚动发起 → 47.494197 滚动完成 误差=310px`（只隔 1 毫秒）。
+enum FollowScrollOutcome {
+  /// 真的滚到目标
+  arrived,
+
+  /// 被打断：动画还没走完（用时过短）或已被新目标接管 —— 交给接管者
+  interrupted,
+
+  /// 走完了但没到：撞到边界 / 内容高度不够
+  clipped,
+}
+
+@visibleForTesting
+FollowScrollOutcome classifyFollowScroll({
+  required double error,
+  required int elapsedMs,
+  required bool superseded,
+}) {
+  if (error < 1.5) return FollowScrollOutcome.arrived;
+  // 200ms 的动画跑不到 120ms 就"完成"，只可能是被打断
+  if (elapsedMs < 120 || superseded) return FollowScrollOutcome.interrupted;
+  return FollowScrollOutcome.clipped;
+}
+
 /// 正文块：章节标题栏或段落。扁平化成一条列表交给 ListView 惰性构建，
 /// 避免「一章几万段」时一次性构建全部 TextSpan 造成卡顿 / OOM。
 sealed class _Block {
@@ -734,6 +763,12 @@ class _ReaderPageState extends State<ReaderPage> {
     if (explicit != null) return explicit;
 
     // 写回的进度 → 位置
+    //
+    // ⚠️ 这里**只认文档对象上的快照**。试过用模块级 Map 存"本进程最近一次落盘"
+    // 来补「刚写完盘马上重进拿到旧值」，但那份缓存会跨用例/跨文档残留
+    // （测试里同一个 docId 复用），把回到开头之类的用例全带红 —— 撤掉了。
+    // 真要修，得让 `_persistProgress()` 更新文档列表里的那个对象（生产者侧），
+    // 不是在消费者这边加一层缓存。
     var saved = document.cursorAt(widget.document.progress);
     if (widget.document.progress <= 0) saved = (0, 0, 0);
 
@@ -2085,8 +2120,16 @@ class _ReaderPageState extends State<ReaderPage> {
     final child = _isPdf && !_pdfTextView ? _pdfView() : _content(cursor);
     final background = _style.background;
     // PDF 原版式自带页面底色，不套阅读底色，免得页面外圈出现色块
-    if (background == null || (_isPdf && !_pdfTextView)) return child;
-    return ColoredBox(color: background, child: child);
+    if (_isPdf && !_pdfTextView) return child;
+    // ★D2（平板）：**纸面铺满整屏**，两侧不再露桌面底色。
+    //
+    // 原来只在用户选了阅读底色时才套 ColoredBox，默认底色下正文是「中间一栏
+    // 白纸 + 两侧主题色」，平板上看就是两条留白。现在正文一栏始终和纸面同色，
+    // 留白消失；文字本身仍旧限宽（见 [_content] 的 ContentWidth）。
+    return ColoredBox(
+      color: background ?? Theme.of(context).colorScheme.surface,
+      child: child,
+    );
   }
 
   Widget _content((int, int, int)? cursor) {
@@ -2105,15 +2148,18 @@ class _ReaderPageState extends State<ReaderPage> {
     }
     return Stack(
       children: <Widget>[
-        // 平板横屏下正文限宽居中：一行铺满 1200dp 会很难换行
-        ContentWidth(
-          // 平板上按屏宽分档（手机 820 / 平板 900 / 超宽 960）：
-          // 原来写死 820，平板上就是「手机那一栏居中放」，两侧空一大片。
-          maxWidth: readerMaxContentWidth(context),
-          child: LayoutBuilder(
-            builder: (context, constraints) {
-              _pageViewportWidth = constraints.maxWidth;
-              return Listener(
+        // ★整面滑动（用户要求「除了上下控制栏，整面都能左右滑」）：
+        // PageView 现在**铺满整屏**，文字栏的限宽挪到每一页内部（见 `_pageView`）。
+        // 原来把 ContentWidth 套在 PageView 外面：平板上只有中间那 900dp 是
+        // PageView，两侧的纸面根本收不到滑动 —— 看起来就是「两边滑不动」。
+        LayoutBuilder(
+          builder: (context, constraints) {
+            // 文字栏宽（量句子/换行估算都用它，必须与页内实际栏宽一致）
+            _pageViewportWidth = math.min(
+              constraints.maxWidth,
+              readerMaxContentWidth(context),
+            );
+            return Listener(
                 // 用户**拖动**正文（滑动翻页 / 滚动）= 自己翻着看：暂停自动跟随
                 // （想跟回来按「回到朗读页」）。与 PDF 原版式的「用户碰了页面就不跟」同义。
                 //
@@ -2135,12 +2181,13 @@ class _ReaderPageState extends State<ReaderPage> {
                   controller: _pageController,
                   itemCount: _paging.pageCount,
                   onPageChanged: _onPageChanged,
+                  // PageView 铺满整屏：滑动从纸面任何位置都能接住，
+                  // 不再是「只有中间一栏能滑」
                   itemBuilder: (context, index) =>
                       _pageView(document, cursor, index),
                 ),
-              );
-            },
-          ),
+                );
+          },
         ),
         // 「返回朗读页」：正在朗读、而用户已经离开朗读位置时出现。
         //
@@ -2216,17 +2263,22 @@ class _ReaderPageState extends State<ReaderPage> {
           }
           return false;
         },
-        child: ListView.builder(
-          key: ValueKey<String>('reader-page-$index'),
-          controller: _pageScroll(index),
-          // 上下留白按屏宽分档：手机上顶部 8 / 底部 80（最后一行不被控制栏挡住），
-          // 平板屏幕高得多，沿用这两个值会让正文顶到状态栏、底部空一大片。
-          padding: EdgeInsets.only(
-            top: readerPageVerticalPadding(context).top,
-            bottom: readerPageVerticalPadding(context).bottom,
-          ),
-          itemCount: page.blockCount,
-          itemBuilder: (context, local) {
+        // 文字栏限宽**在页内**：PageView 铺满整屏（整面可滑），
+        // 但正文只占中间这一栏，两侧是同一张纸的页边。
+        child: Center(
+          child: ConstrainedBox(
+            constraints: BoxConstraints(maxWidth: readerMaxContentWidth(context)),
+            child: ListView.builder(
+              key: ValueKey<String>('reader-page-$index'),
+              controller: _pageScroll(index),
+              // 上下留白按屏宽分档：手机上顶部 8 / 底部 80（最后一行不被控制栏挡住），
+              // 平板屏幕高得多，沿用这两个值会让正文顶到状态栏、底部空一大片。
+              padding: EdgeInsets.only(
+                top: readerPageVerticalPadding(context).top,
+                bottom: readerPageVerticalPadding(context).bottom,
+              ),
+              itemCount: page.blockCount,
+              itemBuilder: (context, local) {
             final blockIndex = page.blockStart + local;
             if (blockIndex < 0 || blockIndex >= _blocks.length) {
               return const SizedBox.shrink();
@@ -2254,6 +2306,8 @@ class _ReaderPageState extends State<ReaderPage> {
             final anchor = _anchors.putIfAbsent(blockIndex, () => GlobalKey());
             return KeyedSubtree(key: anchor, child: child);
           },
+            ),
+          ),
         ),
       ),
     );
@@ -3368,6 +3422,11 @@ class _ReaderPageState extends State<ReaderPage> {
     }
 
     // 页内对齐：本页的列表可能还在构建，给它几帧
+    //
+    // 先接管滚动：定位用的是 `ensureVisible(duration: 0)`（jumpTo），
+    // 它会立刻结束跟随正在跑的 animateTo —— 不接管就会出现
+    // 「animateTo 1ms 后报完成、落点在半路」那种假完成（见 [_scrollOwner]）。
+    _takeScrollOwnership('reveal');
     for (var attempt = 0; attempt < 6; attempt++) {
       final anchorContext = _anchors[target]?.currentContext;
       if (anchorContext != null && anchorContext.mounted) {
@@ -3434,16 +3493,22 @@ class _ReaderPageState extends State<ReaderPage> {
 
   /// 等下一帧结束
   ///
-  /// 用 `endOfFrame` + 定时器双保险：`endOfFrame` 依赖调度器真的在出帧，
-  /// 某些时序（比如测试里没有待处理帧）会让它一直挂着，整条定位链路就卡死。
+  /// ⚠️ 原来用 `Timer.run` 兜底，而它**永远先于** `addPostFrameCallback` 完成
+  /// （事件循环转一圈 vs 等一帧渲染），于是「等 6 帧」实际是「6 次空转」：
+  /// 真机日志 `定位外推 锚点 6 帧未建出` 到 `进入定位结束 轮次用尽` 只隔 **1.3 毫秒**
+  /// —— 锚点当然建不出来，接着就外推跳过 1332px，用户看到「先闪错再跳回」。
+  ///
+  /// 现在：主动 `scheduleFrame()` 要一帧，等真帧；40ms 兜底只防「测试里没有 pump」
+  /// 这种真的没帧可等的情况，不会再把 10 轮压成 1 毫秒。
   Future<void> _nextFrame() async {
     final done = Completer<void>();
-    WidgetsBinding.instance.addPostFrameCallback((_) {
+    void finish() {
       if (!done.isCompleted) done.complete();
-    });
-    Timer.run(() {
-      if (!done.isCompleted) done.complete();
-    });
+    }
+
+    WidgetsBinding.instance.addPostFrameCallback((_) => finish());
+    WidgetsBinding.instance.scheduleFrame();
+    Timer(const Duration(milliseconds: 16), finish);
     await done.future;
   }
 
@@ -4063,9 +4128,13 @@ class _ReaderPageState extends State<ReaderPage> {
         await _revealBlock(live, alignment: 0.35);
         if (!mounted) return;
         final ok = _paragraphComfortable(live);
+        // ⚠️ 这里判的是「段落可见」，跟随要的是「句心居中」—— 两个口径，
+        // 不能混着报。真机日志里 `★未到位（误差 310px）` 紧跟一条
+        // `已舒适落位`，就是拿"可见"冒充了"居中"。
+        // 定位只负责把目标带进视野，居中由下一拍跟随做（[_, _ensureSentenceVisible]）。
         _followLog(
           '定位链',
-          '块=$live 结果=${ok ? "已舒适落位" : "★未落位（将重试）"} stall=$stall '
+          '块=$live 结果=${ok ? "已可见（居中交给跟随）" : "★未落位（将重试）"} stall=$stall '
           '想要=$_revealWantBlock ${_anchorProbe(live)}',
         );
         if (ok) {
@@ -4089,6 +4158,8 @@ class _ReaderPageState extends State<ReaderPage> {
       }
     } finally {
       _revealBusy = false;
+      // 定位链收工，把滚动所有权交还（下一拍跟随才能动 position）
+      if (_scrollOwner == 'reveal') _scrollOwner = '';
     }
   }
 
@@ -4486,6 +4557,34 @@ class _ReaderPageState extends State<ReaderPage> {
     return (current - target).abs() < 8;
   }
 
+  /// 当前是谁在改这一页的 ScrollPosition（空 = 没有在跑）
+  ///
+  /// **同一时刻只允许一条路径改 position**。原来跟随的 `animateTo`（200ms）和
+  /// 定位的 `Scrollable.ensureVisible(duration: 0)`（jumpTo）可以并发：
+  /// 真机日志
+  /// ```
+  /// 47.493338 滚动发起 目标=2843.8
+  /// 47.494197 滚动完成 落点=2533.8 误差=310.0px ★未到位   ← 1 毫秒就"完成"
+  /// 47.495034 定位完成 ensureVisible(瞬时)
+  /// ```
+  /// jumpTo 把 animateTo 的 Future 直接结束了 —— 落点在起止点中间，
+  /// 却被记成"完成/未到位"，两条路径互相打断。
+  String _scrollOwner = '';
+
+  /// 接管滚动：撤掉正在跑的动画（不移动像素），记录新主人
+  void _takeScrollOwnership(String who) {
+    final scroll = _pageScroll(_displayedPage);
+    if (scroll.hasClients) {
+      scroll.position.jumpTo(scroll.position.pixels);
+    }
+    if (_scrollOwner.isNotEmpty && _scrollOwner != who) {
+      _followLog('滚动接管', '$_scrollOwner → $who');
+    }
+    _scrollOwner = who;
+    // 动画已经被撤掉，旧的"在跑目标"不再作数
+    _followScrollTarget = null;
+  }
+
   void _startFollowScroll(ScrollController scroll, double target) {
     // 关键：先把正在跑的滚动动画停住。
     // `jumpTo(当前像素)` = 取消动画但不移动，否则两次 animateTo 会叠加、画面来回抖。
@@ -4493,14 +4592,16 @@ class _ReaderPageState extends State<ReaderPage> {
       _followLog('滚动跳过', 'animateTo 前控制器已无客户端');
       return;
     }
+    _takeScrollOwnership('follow');
     final from = scroll.position.pixels;
-    scroll.position.jumpTo(scroll.position.pixels);
     _followScrollTarget = target;
     _followScrollTimer?.cancel();
     // 动画 200ms；多留一点余量再允许下一次同目标滚动
     _followScrollTimer = Timer(const Duration(milliseconds: 260), () {
       _followScrollTarget = null;
+      if (_scrollOwner == 'follow') _scrollOwner = '';
     });
+    final startedAt = DateTime.now();
     // 观测③：用的就是 animateTo；把「起点 / 目标 / 是否打断了上一次」记下来。
     final interrupted = from != scroll.position.pixels;
     unawaited(
@@ -4514,12 +4615,26 @@ class _ReaderPageState extends State<ReaderPage> {
         // 动画正常收尾：回报实际落点（判断"有没有滚到位"）
         if (!mounted || !scroll.hasClients) return;
         final landed = scroll.position.pixels;
+        final double error = (landed - target).abs();
+        final int elapsed = DateTime.now().difference(startedAt).inMilliseconds;
+        final current = _followScrollTarget;
+        final bool superseded = current != null && (current - target).abs() >= 8;
+        final FollowScrollOutcome outcome = classifyFollowScroll(
+          error: error,
+          elapsedMs: elapsed,
+          superseded: superseded,
+        );
         _followLog(
           '滚动完成',
           '目标=${target.toStringAsFixed(1)} 落点=${landed.toStringAsFixed(1)} '
-          '误差=${(landed - target).abs().toStringAsFixed(1)}px '
-          '${(landed - target).abs() < 1.5 ? "已到位" : "★未到位（被后续滚动接管或撞界）"}',
+          '误差=${error.toStringAsFixed(1)}px 用时=${elapsed}ms '
+          '${switch (outcome) {
+            FollowScrollOutcome.arrived => '已到位',
+            FollowScrollOutcome.interrupted => '★被打断（被接管，交给接管者）',
+            FollowScrollOutcome.clipped => '★未到位（撞界）',
+          }}',
         );
+        if (_scrollOwner == 'follow') _scrollOwner = '';
       })
           .catchError((Object _) {
         // 被新的跟随滚动打断是正常的，不是错误
@@ -4818,7 +4933,7 @@ class _ReaderPageState extends State<ReaderPage> {
     _textReadMode = false;
     _rememberVisibleSpot();
     _persistProgress();
-    unawaited(_tts.stop());
+    unawaited(_tts.stopByUser());
     if (mounted) setState(() {});
   }
 

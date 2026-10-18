@@ -41,6 +41,13 @@ enum DocumentSort {
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
 
+  /// 文档库搜索行右侧的「导入文件」方形按钮
+  ///
+  /// 2026-10-18 起导入从右下角悬浮按钮挪到搜索行旁边：控制栏展开时会向
+  /// 左铺开，原来的悬浮按钮会被挤走；放这里位置固定，也不挡列表最后几本。
+  /// 用例统一用这个 key 找它（别再按 `FloatingActionButton` + 文字找）。
+  static const Key importButtonKey = ValueKey<String>('library-import');
+
   /// 「返回朗读页」该跳去哪本书（**纯函数，便于单测钉住**）
   ///
   /// ## ⚠️ 判据必须与控制栏一致：`isPlaybackActive`，不是 `isActive`
@@ -430,19 +437,19 @@ class _HomePageState extends State<HomePage> {
       body: wide
           ? Row(children: <Widget>[rail, const VerticalDivider(width: 1), Expanded(child: paddedBody)])
           : paddedBody,
+      // 胶片（朗读控制栏）从右下角发起：展开时向左延伸成一条（见 ReadingControlBar）
       floatingActionButton: _index == 0
-          ? Row(
-              mainAxisSize: MainAxisSize.min,
-              children: <Widget>[
-                // 可折叠的朗读控制栏：收起是碟片，展开在「导入文件」左侧铺开
-                ReadingControlBar(onReturnToReading: _openReadingPage),
-                const SizedBox(width: 12),
-                FloatingActionButton.extended(
-                  onPressed: _import,
-                  icon: const Icon(Icons.add),
-                  label: const Text('导入文件'),
-                ),
-              ],
+          ? ReadingControlBar(
+              onReturnToReading: _openReadingPage,
+              onOpenSettings: () => _selectTab(2),
+              // 迷你条的封面：按文档 id 查库里的封面路径（查不到就用占位图）
+              coverPathOf: (documentId) {
+                if (documentId == null || documentId.isEmpty) return null;
+                for (final doc in _documents) {
+                  if (doc.id == documentId) return doc.coverPath;
+                }
+                return null;
+              },
             )
           : null,
       bottomNavigationBar: wide
@@ -513,6 +520,9 @@ class _HomePageState extends State<HomePage> {
             ),
             const SizedBox(height: 20),
             FilledButton.tonalIcon(
+              // 空库时这里是唯一入口；非空库时同一个 key 落在搜索行右侧的方形按钮上
+              //（两者互斥，不会同时出现，所以 key 不冲突）
+              key: HomePage.importButtonKey,
               onPressed: _import,
               icon: const Icon(Icons.add),
               label: const Text('导入文件'),
@@ -560,38 +570,74 @@ class _HomePageState extends State<HomePage> {
   }
 
   /// 文档库搜索栏
+  ///
+  /// 版式（2026-10-18 改）：**圆角矩形搜索框 + 右侧方形「＋」导入键**。
+  /// 导入原来是个右下角的悬浮按钮，展开的控制栏一拉宽就把它挤走了；
+  /// 现在挪到搜索行右边，位置固定、也不会挡住列表最后几本。
   Widget _librarySearchBar() {
     final theme = Theme.of(context);
     final searching = _keyword.isNotEmpty;
     return Padding(
       padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
-      child: TextField(
-        controller: _search,
-        textInputAction: TextInputAction.search,
-        onChanged: (_) => setState(() {}),
-        decoration: InputDecoration(
-          isDense: true,
-          hintText: '搜索书名或文件名',
-          prefixIcon: const Icon(Icons.search, size: 20),
-          suffixIcon: searching
-              ? IconButton(
-                  tooltip: '清空',
-                  icon: const Icon(Icons.close, size: 18),
-                  onPressed: () {
-                    _search.clear();
-                    setState(() {});
-                  },
-                )
-              : null,
-          helperText: searching
-              ? (() {
-                  final count = _visible.length;
-                  return count == 0 ? '没有匹配的文档' : '找到 $count 本';
-                })()
-              : null,
-          border: const OutlineInputBorder(),
-        ),
-        style: theme.textTheme.bodyMedium,
+      child: Row(
+        children: <Widget>[
+          Expanded(
+            child: TextField(
+              controller: _search,
+              textInputAction: TextInputAction.search,
+              onChanged: (_) => setState(() {}),
+              decoration: InputDecoration(
+                isDense: true,
+                hintText: '搜索书名或文件名',
+                prefixIcon: const Icon(Icons.search, size: 20),
+                suffixIcon: searching
+                    ? IconButton(
+                        tooltip: '清空',
+                        icon: const Icon(Icons.close, size: 18),
+                        onPressed: () {
+                          _search.clear();
+                          setState(() {});
+                        },
+                      )
+                    : null,
+                helperText: searching
+                    ? (() {
+                        final count = _visible.length;
+                        return count == 0 ? '没有匹配的文档' : '找到 $count 本';
+                      })()
+                    : null,
+                // 圆角矩形（原来是没有圆角的 OutlineInputBorder）
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(18),
+                ),
+                enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(18),
+                ),
+                focusedBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(18),
+                ),
+              ),
+              style: theme.textTheme.bodyMedium,
+            ),
+          ),
+          const SizedBox(width: 10),
+          SizedBox(
+            width: 56,
+            height: 56,
+            child: IconButton.filledTonal(
+              key: HomePage.importButtonKey,
+              tooltip: '导入文件',
+              onPressed: _import,
+              iconSize: 26,
+              icon: const Icon(Icons.add),
+              style: IconButton.styleFrom(
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(16),
+                ),
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }

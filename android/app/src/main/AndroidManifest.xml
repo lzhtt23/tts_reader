@@ -45,17 +45,18 @@
     <application
         android:label="桃花源阅读器"
         android:name="${applicationName}"
-        android:icon="@mipmap/ic_launcher"
+        android:icon="@mipmap/ic_launcher_classic"
         android:usesCleartextTraffic="true">
         <!--
-          启动图标：只用一套编译进包里的图标（@mipmap/ic_launcher）。
+          启动图标：内置样式可切换（不支持自定义图片）。
 
-          历史说明：这里原来有一组 `activity-alias`，配合 Android 侧的
-          PackageManager 做「一键切换启动图标」。该功能**已按要求删除** ——
-          不同 ROM 上表现不一致（切了没反应、桌面图标缓存不刷新），
-          属于看着能用、实际不可靠的功能。
+          做法：MainActivity **不再挂 LAUNCHER**，改由三个 activity-alias 各挂一套图标，
+          运行时只启用其中一个（见 IconChannel.kt）。需要切换图标时只改 alias，
+          不用重新安装。
 
-          因此 MainActivity 恢复为唯一的启动入口（不再是 enabled=false + alias 兜底）。
+          ⚠️ 已知限制：部分 ROM 切换后桌面图标不立刻刷新（启动器缓存），
+          桌面已有的快捷方式指向旧 alias，切换后会消失 —— 所以只提供内置样式，
+          且设置里会写明这一点。
         -->
         <activity
             android:name=".MainActivity"
@@ -69,12 +70,6 @@
             <meta-data
                 android:name="io.flutter.embedding.android.NormalTheme"
                 android:resource="@style/NormalTheme" />
-
-            <!-- 桌面入口 -->
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
 
             <!-- 分享即朗读：其它应用「分享 → 桃花源阅读器」 -->
             <intent-filter>
@@ -98,6 +93,51 @@
                 <data android:mimeType="text/plain" />
             </intent-filter>
         </activity>
+
+        <!-- ============ 启动图标：三个内置样式（activity-alias） ============
+             同一时刻只启用一个（由 IconChannel 切换）。默认启用 sickle。 -->
+
+        <activity-alias
+            android:name=".LauncherSickle"
+            android:targetActivity=".MainActivity"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher_sickle"
+            android:roundIcon="@mipmap/ic_launcher_sickle"
+            android:label="桃花源阅读器"
+            android:enabled="false">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <activity-alias
+            android:name=".LauncherBooks"
+            android:targetActivity=".MainActivity"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher_books"
+            android:roundIcon="@mipmap/ic_launcher_books"
+            android:label="桃花源阅读器"
+            android:enabled="false">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <activity-alias
+            android:name=".LauncherClassic"
+            android:targetActivity=".MainActivity"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher_classic"
+            android:roundIcon="@mipmap/ic_launcher_classic"
+            android:label="桃花源阅读器"
+            android:enabled="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
 
         <meta-data
             android:name="flutterEmbedding"

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 一排书 + 红星（可选样式） -->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/ic_launcher_paper" />
+    <foreground android:drawable="@mipmap/ic_launcher_books_foreground" />
+    <monochrome android:drawable="@mipmap/ic_launcher_books_monochrome" />
+</adaptive-icon>

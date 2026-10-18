@@ -46,6 +46,8 @@ class MainActivity : AudioServiceActivity() {
         FolderChannel.attach(this, flutterEngine.dartExecutor.binaryMessenger)
         // MP3 导出用的 LAME 编码通道（tts_reader/lame；库缺失时返回 false，Dart 侧回退 WAV）
         LameChannel.attach(flutterEngine.dartExecutor.binaryMessenger)
+        // 启动图标样式切换（tts_reader/icon：切 activity-alias，无需权限）
+        IconChannel.attach(this, flutterEngine.dartExecutor.binaryMessenger)
         // 引擎此刻才可用：把本次启动 intent 的文本补推一次
         deliverPending()
     }

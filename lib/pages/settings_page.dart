@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import '../models/reader_style.dart';
+import '../services/app_icon.dart';
 import '../services/appearance_service.dart';
 import '../services/auto_sleep.dart';
 import '../services/c2s.dart';
@@ -181,6 +182,7 @@ class _SettingsPageState extends State<SettingsPage> {
         padding: const EdgeInsets.fromLTRB(12, 8, 12, 96),
         children: <Widget>[
           _themeCard(),
+          _appIconCard(),
           _readerStyleCard(),
           _mediaInterruptCard(),
           _engineCard(tts),
@@ -212,6 +214,102 @@ class _SettingsPageState extends State<SettingsPage> {
   );
 
   // ---------------- 外观 ----------------
+
+  /// 启动图标样式（内置三种，不支持自定义图片）
+  Widget _appIconCard() {
+    return Card.filled(
+      margin: const EdgeInsets.only(bottom: 12),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            _groupTitle('应用图标'),
+            const SizedBox(height: 4),
+            Text(
+              '只支持内置样式。切换后桌面图标可能要等一会儿才刷新，'
+              '桌面上已有的快捷方式会消失——这是 Android 的机制，不是 bug。',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+            const SizedBox(height: 12),
+            FutureBuilder<AppIconStyle>(
+              future: _iconStyleFuture ??= AppIcon.current().then((s) => _iconStyle = s),
+              builder: (context, snapshot) {
+                final current = _iconStyle ?? snapshot.data ?? AppIconStyle.sickle;
+                return Row(
+                  children: <Widget>[
+                    for (final style in AppIconStyle.values)
+                      Expanded(
+                        child: Padding(
+                          padding: const EdgeInsets.only(right: 8),
+                          child: _iconChoice(style, current),
+                        ),
+                      ),
+                  ],
+                );
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<AppIconStyle>? _iconStyleFuture;
+  AppIconStyle? _iconStyle;
+  bool _iconSwitching = false;
+
+  Widget _iconChoice(AppIconStyle style, AppIconStyle current) {
+    final selected = style == current;
+    final scheme = Theme.of(context).colorScheme;
+    return InkWell(
+      borderRadius: BorderRadius.circular(12),
+      onTap: _iconSwitching || selected ? null : () => _pickIcon(style),
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(
+            color: selected ? scheme.primary : scheme.outlineVariant,
+            width: selected ? 2 : 1,
+          ),
+        ),
+        child: Column(
+          children: <Widget>[
+            ClipRRect(
+              borderRadius: BorderRadius.circular(12),
+              child: Image.asset(style.asset, width: 48, height: 48),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              style.label,
+              style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                    color: selected ? scheme.primary : null,
+                    fontWeight: selected ? FontWeight.w600 : null,
+                  ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _pickIcon(AppIconStyle style) async {
+    setState(() => _iconSwitching = true);
+    final ok = await AppIcon.apply(style);
+    if (!mounted) return;
+    setState(() {
+      _iconSwitching = false;
+      if (ok) _iconStyle = style;
+    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(ok
+            ? '已切换到「${style.label}」；桌面图标可能要等一会儿才刷新'
+            : '切换失败：这个系统不支持运行时换图标'),
+      ),
+    );
+  }
 
   Widget _themeCard() {
     final storage = StorageService.instance;

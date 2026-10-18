@@ -1,10 +1,12 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../features/pdf_reading/pdf_read_session.dart';
 import '../tts/tts_manager.dart';
+import 'wave_progress.dart';
 
 /// 控制栏的**数据来源视图**：把两个平行会话抹平成同一组字段。
 ///
@@ -27,11 +29,23 @@ class _BarSource {
     required this.onPlayPause,
     required this.onNextSentence,
     required this.onStop,
+    this.progress = 0,
+    this.progressLabel,
+    this.documentId,
   });
 
   final String title;
   final String subtitle;
   final bool playing;
+
+  /// 0~1，喂给波浪进度条
+  final double progress;
+
+  /// 进度旁的小字（如 `128 / 328`）；null 表示不显示
+  final String? progressLabel;
+
+  /// 当前在读的文档 id：用来查封面（`coverPathOf`）
+  final String? documentId;
 
   /// 暂停之后能不能「继续」（PDF 会话在末句读完时不能）
   final bool canResume;
@@ -52,10 +66,24 @@ class _BarSource {
 /// 只监听 [TtsManager] 与 [PdfReadSession]，不要在外层用 `context.watch` ——
 /// 朗读时管理器每句都会发通知，外层跟着重建会把文档库列表也一起重建。
 class ReadingControlBar extends StatefulWidget {
-  const ReadingControlBar({super.key, required this.onReturnToReading});
+  const ReadingControlBar({
+    super.key,
+    required this.onReturnToReading,
+    this.onOpenSettings,
+    this.coverPathOf,
+  });
 
   /// 「返回朗读页」：跳回正在朗读的那本书（没在读整本书时调用方自己给提示）
   final Future<void> Function() onReturnToReading;
+
+  /// 跳设置页（现在条上不占键位，保留给以后的入口）
+  final void Function()? onOpenSettings;
+
+  /// 按文档 id 查封面文件路径（文档库有现成的 `coverPath`）；查不到用占位图
+  final String? Function(String? documentId)? coverPathOf;
+
+  /// 展开态的齿轮按钮（设置）
+  static const Key settingsKey = ValueKey<String>('reading-settings');
 
   /// 收起态的碟片（测试用；tooltip 会随播放状态变，不适合当锚点）
   static const Key discKey = ValueKey<String>('reading-disc');
@@ -182,6 +210,13 @@ class _ReadingControlBarState extends State<ReadingControlBar>
         subtitle: pdf.positionLabel.isEmpty ? '—' : pdf.positionLabel,
         playing: pdf.isPlaying,
         canResume: pdf.current != null,
+        progress: pdf.pageCount <= 0
+            ? 0
+            : ((pdf.progressIndex + 1) / pdf.pageCount).clamp(0.0, 1.0),
+        progressLabel: pdf.pageCount <= 0
+            ? null
+            : '${pdf.progressIndex + 1} / ${pdf.pageCount}',
+        documentId: pdf.documentId,
         onPlayPause: () {
           // ★v1.21.54 诊断：与 `TtsAudioHandler.play()` 那条对齐，一次记全。
           // 用户报「切书后播放读回旧书」，两入口都要能一眼看出"这一下读了谁"。
@@ -210,6 +245,13 @@ class _ReadingControlBarState extends State<ReadingControlBar>
       );
     }
     if (!tts.hasSession) return null;
+    // 「只有在读的时候才显示」：阅读页按方块键结束朗读后 `stop()` 只停声、
+    // 故意留着会话记进度（`hasSession` 仍为真）。只按 hasSession 判断的话，
+    // 结束朗读后这条会一直挂在文档库上不消失（用户报的现象）。
+    if (tts.endedByStop) {
+      ReadingControlBar.diagnose('TTS 已被用户结束朗读（endedByStop）→ 整条隐藏');
+      return null;
+    }
     return _BarSource(
       title: tts.documentTitle.isEmpty ? '未命名文档' : tts.documentTitle,
       subtitle: tts.currentChapterTitle.isNotEmpty
@@ -217,6 +259,11 @@ class _ReadingControlBarState extends State<ReadingControlBar>
           : (tts.positionLabel.isNotEmpty ? tts.positionLabel : '—'),
       playing: tts.playing,
       canResume: true,
+      progress: tts.progress,
+      progressLabel: tts.progressTotal <= 0
+          ? null
+          : '${tts.progressIndex} / ${tts.progressTotal}',
+      documentId: tts.activeDocumentId,
       onPlayPause: () {
         // ★v1.21.54 诊断：同上，TTS 分支也要能一眼看出"这一下读了谁"。
         ReadingControlBar.diagnose(
@@ -280,92 +327,96 @@ class _ReadingControlBarState extends State<ReadingControlBar>
     unawaited(tts.endSessionAndClear());
   }
 
-  /// 展开态：胶囊控制栏（上两行文字，下面一排按钮）
+  /// 展开态：**一条**（封面 | 书名 + 波浪进度 | 停止 · 设置 · 播放）
   ///
-  /// 宽度按可用空间算：手机竖屏时「导入文件」按钮就占掉约 130，
-  /// 一行排不下「文字 + 五个按钮」（会挤成「未命…」并顶到屏幕外），
-  /// 所以改成上下两行 —— 文字有整行宽度，按钮排下面。
+  /// 2026-10-18 按用户要求放大触控区：条高 76、按键 48dp、间距 12dp
+  /// （原来是 34dp / 间距 6，容易误触）。收起不再占键位——再点一次封面就收起。
   Widget _expandedBar(BuildContext context, _BarSource source) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
     final playing = source.playing;
     final screenWidth = MediaQuery.sizeOf(context).width;
-    // 「导入文件」按钮（带文字）在竖屏手机上占掉约 130，剩下才是控制栏的
-    final barWidth = (screenWidth - 190).clamp(180.0, 340.0);
-    final subtitle = source.subtitle;
+    // 宽度上限 420（2026-10-18 从 560 收窄）：560 时竖屏占屏 73%、横屏左边空一大块，
+    // 420 既放得下「封面+书名+进度+三个 48dp 键」，又不会显得糊在屏幕上。
+    final barWidth = (screenWidth - 32).clamp(240.0, 420.0);
 
     return Padding(
-      padding: const EdgeInsets.only(bottom: 2),
+      padding: const EdgeInsets.only(left: 16, right: 16, bottom: 4),
       child: SizedBox(
         width: barWidth,
+        height: 76,
         child: Material(
           key: ReadingControlBar.barKey,
           color: scheme.surfaceContainerHigh,
-          elevation: 3,
+          elevation: 6,
           borderRadius: BorderRadius.circular(20),
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(12, 8, 6, 4),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            child: Row(
               children: <Widget>[
-                Text(
-                  source.title,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: theme.textTheme.labelLarge,
+                // 封面：点它收起回小方块（热区 48dp）。
+                // 「返回朗读页」放在右边书名/进度那块 —— 文字区本来就宽，好点。
+                InkWell(
+                  key: ReadingControlBar.discKey,
+                  borderRadius: BorderRadius.circular(9),
+                  onTap: () => setState(() => _expanded = false),
+                  child: _cover(
+                    scheme,
+                    playing: playing,
+                    size: 48,
+                    path: widget.coverPathOf?.call(source.documentId),
+                  ),
                 ),
-                Text(
-                  subtitle,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: theme.textTheme.bodySmall,
-                ),
-                // 按钮尺寸跟着可用宽度走：五个 IconButton 默认各占 48
-                //（最小触控尺寸），窄屏上会直接溢出屏幕，所以这里按 1/5 均分
-                LayoutBuilder(
-                  builder: (context, constraints) {
-                    final size = (constraints.maxWidth / 5).clamp(32.0, 40.0);
-                    return Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                const SizedBox(width: 12),
+                Expanded(
+                  child: InkWell(
+                    key: ReadingControlBar.returnKey,
+                    borderRadius: BorderRadius.circular(8),
+                    onTap: () => unawaited(widget.onReturnToReading()),
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: <Widget>[
-                        _iconButton(
-                          size: size,
-                          tooltip: playing ? '暂停' : '播放',
-                          icon: playing ? Icons.pause : Icons.play_arrow,
-                          onPressed: source.onPlayPause,
+                        Text(
+                          source.title,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: theme.textTheme.labelLarge,
                         ),
-                        _iconButton(
-                          size: size,
-                          tooltip: '下一句',
-                          icon: Icons.fast_forward,
-                          onPressed: source.onNextSentence,
-                        ),
-                        _iconButton(
-                          key: ReadingControlBar.returnKey,
-                          size: size,
-                          tooltip: '返回朗读页',
-                          icon: Icons.my_location,
-                          onPressed: () => unawaited(widget.onReturnToReading()),
-                        ),
-                        _iconButton(
-                          key: ReadingControlBar.stopKey,
-                          size: size,
-                          tooltip: '停止并收起',
-                          icon: Icons.stop,
-                          // 方块键：TXT 是「终止并清空」、PDF 是「只停声」
-                          //（语义由 _pickSource 决定，见 _BarSource 的说明）
-                          onPressed: source.onStop,
-                        ),
-                        _iconButton(
-                          size: size,
-                          tooltip: '收起',
-                          icon: Icons.chevron_right,
-                          onPressed: () => setState(() => _expanded = false),
+                        const SizedBox(height: 4),
+                        WaveProgressBar(
+                          value: source.progress,
+                          label: source.progressLabel,
+                          height: 12,
+                          playing: playing,
                         ),
                       ],
-                    );
-                  },
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                _iconButton(
+                  size: 48,
+                  tooltip: '下一句',
+                  icon: Icons.fast_forward,
+                  onPressed: source.onNextSentence,
+                ),
+                const SizedBox(width: 12),
+                _iconButton(
+                  key: ReadingControlBar.stopKey,
+                  size: 48,
+                  tooltip: '停止并结束朗读',
+                  icon: Icons.stop,
+                  // 方块键：TXT 是「终止并清空」、PDF 是「只停声」
+                  //（语义由 _pickSource 决定，见 _BarSource 的说明）
+                  onPressed: source.onStop,
+                ),
+                const SizedBox(width: 12),
+                _iconButton(
+                  size: 52,
+                  tooltip: playing ? '暂停' : '播放',
+                  icon: playing ? Icons.pause : Icons.play_arrow,
+                  onPressed: source.onPlayPause,
                 ),
               ],
             ),
@@ -375,59 +426,71 @@ class _ReadingControlBarState extends State<ReadingControlBar>
     );
   }
 
-  /// 收起态：一张碟片（用主题色画，跟应用整体风格一致）
+  /// 封面：有真实封面就用图，否则退回占位色块 + 书本图标
+  Widget _cover(ColorScheme scheme, {required bool playing, required double size, String? path}) {
+    final placeholder = Container(
+      width: size,
+      height: size,
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(9),
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: <Color>[
+            scheme.primaryContainer,
+            scheme.primaryContainer.withOpacity(0.55),
+          ],
+        ),
+      ),
+      child: Icon(Icons.menu_book, size: size * 0.5, color: scheme.onPrimaryContainer),
+    );
+    if (path == null || path.isEmpty) return placeholder;
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(9),
+      child: Image.file(
+        File(path),
+        width: size,
+        height: size,
+        fit: BoxFit.cover,
+        // 只解码缩略图大小，别为大图掉帧
+        cacheWidth: 160,
+        errorBuilder: (context, error, stackTrace) => placeholder,
+      ),
+    );
+  }
+
+  /// 收起态：**只有一枚封面方块**（用户要求：收起只显示封面）
+  ///
+  /// 点它向左展开成 M1 那条；播放/暂停留给展开态，收起态不做第二件事。
   Widget _disc(BuildContext context, _BarSource source) {
     final scheme = Theme.of(context).colorScheme;
     final playing = source.playing;
-    final disc = SizedBox(
-      width: 56,
-      height: 56,
-      child: DecoratedBox(
-        decoration: BoxDecoration(
-          shape: BoxShape.circle,
-          gradient: RadialGradient(
-            colors: <Color>[
-              scheme.primaryContainer,
-              scheme.primary,
-              Color.alphaBlend(const Color(0x66000000), scheme.primary),
-            ],
-            stops: const <double>[0, 0.45, 1],
-          ),
-          boxShadow: <BoxShadow>[
-            BoxShadow(
-              color: scheme.shadow.withOpacity(0.28),
-              blurRadius: 6,
-              offset: const Offset(0, 2),
-            ),
-          ],
-        ),
-        child: Center(
-          // 中心那个小圆孔：碟片的辨识点
-          child: Container(
-            width: 14,
-            height: 14,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: scheme.surfaceContainerLowest,
-              border: Border.all(color: scheme.outlineVariant, width: 1),
-            ),
-          ),
-        ),
-      ),
-    );
 
     return Tooltip(
       key: ReadingControlBar.discKey,
       message: playing ? '正在朗读 · 点击展开控制栏' : '朗读已暂停 · 点击展开控制栏',
       child: Padding(
-        padding: const EdgeInsets.only(bottom: 6),
-        child: Material(
-          color: Colors.transparent,
-          shape: const CircleBorder(),
-          clipBehavior: Clip.antiAlias,
-          child: InkWell(
-            onTap: () => setState(() => _expanded = true),
-            child: RotationTransition(turns: _spin, child: disc),
+        padding: const EdgeInsets.only(bottom: 4),
+        child: SizedBox(
+          width: 56,
+          height: 56,
+          child: Material(
+            color: scheme.surfaceContainerHigh,
+            elevation: 4,
+            borderRadius: BorderRadius.circular(14),
+            child: InkWell(
+              borderRadius: BorderRadius.circular(14),
+              onTap: () => setState(() => _expanded = true),
+              child: Padding(
+                padding: const EdgeInsets.all(6),
+                child: _cover(
+                  scheme,
+                  playing: playing,
+                  size: 44,
+                  path: widget.coverPathOf?.call(source.documentId),
+                ),
+              ),
+            ),
           ),
         ),
       ),
