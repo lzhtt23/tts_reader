@@ -509,6 +509,21 @@ class _ReaderPageState extends State<ReaderPage> {
   /// 当前阅读排版
   ReaderStyle get _style => StorageService.instance.readerStyle.value;
 
+  /// 正文实际生效的排版：在用户设置之上加「大屏页边距下限」
+  ///
+  /// 手机保持用户设置（默认 12）；平板 / 超宽屏至少 32 / 40，否则文字会贴着
+  /// 栏边。用户自己调得更大时以用户为准（这里只抬下限，不压低）。
+  ///
+  /// ⚠️ 量句子位置（[_measureSentence]）必须用**同一个** style，否则实测宽度
+  /// 与真实排版宽度不一致，句顶/句心会系统性偏。
+  ReaderStyle get _pageStyle {
+    if (!mounted) return _style;
+    final base = _style;
+    final minMargin = readerMinPageMargin(context);
+    if (base.pageMargin >= minMargin) return base;
+    return base.copyWith(pageMargin: minMargin);
+  }
+
   // ---------------- 解析（后台 isolate） ----------------
 
   Future<void> _parse() async {
@@ -2092,7 +2107,9 @@ class _ReaderPageState extends State<ReaderPage> {
       children: <Widget>[
         // 平板横屏下正文限宽居中：一行铺满 1200dp 会很难换行
         ContentWidth(
-          maxWidth: 820,
+          // 平板上按屏宽分档（手机 820 / 平板 900 / 超宽 960）：
+          // 原来写死 820，平板上就是「手机那一栏居中放」，两侧空一大片。
+          maxWidth: readerMaxContentWidth(context),
           child: LayoutBuilder(
             builder: (context, constraints) {
               _pageViewportWidth = constraints.maxWidth;
@@ -2155,7 +2172,8 @@ class _ReaderPageState extends State<ReaderPage> {
   /// 硬撑会把文字挤没；语音推进时页内会跟着滚，读到最后一句才会翻到下一页。
   Widget _pageView(StructuredDocument document, (int, int, int)? cursor, int index) {
     final page = _paging.pageAt(index);
-    final style = _style;
+    // 大屏上页边距有下限（见 [_pageStyle]）；量句子用的是同一个 style
+    final style = _pageStyle;
     final scheme = Theme.of(context).colorScheme;
     return DecoratedBox(
       // 页面底色必须**跟着阅读底色走**。
@@ -2201,7 +2219,12 @@ class _ReaderPageState extends State<ReaderPage> {
         child: ListView.builder(
           key: ValueKey<String>('reader-page-$index'),
           controller: _pageScroll(index),
-          padding: const EdgeInsets.only(top: 8, bottom: 80),
+          // 上下留白按屏宽分档：手机上顶部 8 / 底部 80（最后一行不被控制栏挡住），
+          // 平板屏幕高得多，沿用这两个值会让正文顶到状态栏、底部空一大片。
+          padding: EdgeInsets.only(
+            top: readerPageVerticalPadding(context).top,
+            bottom: readerPageVerticalPadding(context).bottom,
+          ),
           itemCount: page.blockCount,
           itemBuilder: (context, local) {
             final blockIndex = page.blockStart + local;
@@ -2818,7 +2841,7 @@ class _ReaderPageState extends State<ReaderPage> {
     if (sentences.length <= 1 || dy <= 0) return 0;
     final total = paragraph.text.length;
     if (total <= 0) return 0;
-    final style = _style;
+    final style = _pageStyle;
     final lineHeight = style.fontSize * style.lineHeight;
     if (lineHeight <= 0) return 0;
     // 每行大致能排多少字：字号 × 1.0 是中文全角宽度的常用估法，
