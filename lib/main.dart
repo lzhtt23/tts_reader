@@ -5,12 +5,22 @@ import 'package:flutter_downloader/flutter_downloader.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:provider/provider.dart';
 
+import 'models/rss_source.dart';
+import 'models/source_rule.dart';
 import 'pages/home_page.dart';
+import 'pages/source_import_confirm_page.dart';
 import 'pages/speak_now_page.dart';
 import 'services/c2s.dart';
 import 'services/crash_log.dart';
+import 'services/deep_link_intake.dart';
 import 'services/document_service.dart';
 import 'services/download_watcher.dart';
+import 'services/gbk_decoder.dart';
+import 'services/legado_source_store.dart';
+import 'services/rss_importer.dart';
+import 'services/rss_store.dart';
+import 'services/source_importer.dart';
+import 'widgets/rss_import_confirm.dart';
 import 'services/speak_intake.dart';
 import 'services/storage_service.dart';
 import 'services/third_party_licenses.dart';
@@ -27,6 +37,9 @@ Future<void> main() async {
   // 兜底：任何未捕获异常都落盘（logcat 重启就没，文件能留下来）
   await CrashLog.install();
   CrashLog.mark('main() 开始');
+  // 书源抓取：把 GBK 解码器接到 SourceHttpClient 的钩子上（P0）
+  // 不装的话，声明 charset=gbk 的中文站点会被当 UTF-8 解码 → 整页乱码
+  GbkDecoderInstaller.install();
   // 本地设置（文档库、TTS 配置、主题）与朗读调度中心
   await StorageService.instance.init();
   await TtsManager.instance.init();
@@ -83,6 +96,9 @@ class _TtsReaderAppState extends State<TtsReaderApp> with WidgetsBindingObserver
     WidgetsBinding.instance.addObserver(this);
     // 外部文本（分享 / 划词 / C2S）一进来就打开即读页并开始朗读
     _subscription = SpeakIntake.instance.stream.listen(_openSpeakNow);
+    // 深链进来的书源 / 订阅源导入链接（系统把我们拉起来的那条路）
+    DeepLinkIntake.instance.pendingSourceUrl.addListener(_onDeepLink);
+    DeepLinkIntake.instance.pendingRssSourceUrl.addListener(_onRssDeepLink);
     // 冷启动时文本可能已经躺在原生侧，首帧后再取一次（拿不到就算了）
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final SpeakRequest? pending = SpeakIntake.instance.takePending();
@@ -94,9 +110,81 @@ class _TtsReaderAppState extends State<TtsReaderApp> with WidgetsBindingObserver
     });
   }
 
+  /// 深链监听（`pendingSourceUrl` 一变就处理一次）
+  void _onDeepLink() {
+    final String? src = DeepLinkIntake.instance.pendingSourceUrl.value;
+    if (src == null) return;
+    unawaited(_openSourceImport(src));
+  }
+
+  /// 订阅源深链：解析 → **勾选弹窗**（与阅读 App 同款）→ 写订阅源库
+  void _onRssDeepLink() {
+    final String? src = DeepLinkIntake.instance.pendingRssSourceUrl.value;
+    if (src == null) return;
+    unawaited(_openRssImport(src));
+  }
+
+  Future<void> _openRssImport(String src) async {
+    final NavigatorState? navigator = _navigatorKey.currentState;
+    if (navigator == null) {
+      if (_pendingRetries < 10) {
+        _pendingRetries++;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          final String? again =
+              DeepLinkIntake.instance.pendingRssSourceUrl.value;
+          if (again != null) _openRssImport(again);
+        });
+      }
+      return;
+    }
+    _pendingRetries = 0;
+    DeepLinkIntake.instance.consumeRss();
+    CrashLog.mark('深链[处理·订阅源] $src');
+    final ScaffoldMessengerState? messenger =
+        ScaffoldMessenger.maybeOf(navigator.context);
+    try {
+      final RssParseOutcome outcome = await RssImporter.parse(src);
+      if (outcome.isEmpty) {
+        messenger?.showSnackBar(
+          SnackBar(
+            content: Text(
+              outcome.errors.isEmpty ? '没解析出任何订阅源' : outcome.errors.first,
+            ),
+          ),
+        );
+        return;
+      }
+      final List<RssSource> existingAll = await RssStore.instance.load();
+      // 先取根 Navigator 的 context 再进对话框构造：`navigator` 在函数开头
+      // 已做过 null 检查，且根 Navigator 的生命周期等于进程，不存在被销毁的情况。
+      // ignore: use_build_context_synchronously
+      final BuildContext rootContext = navigator.context;
+      final List<RssSource>? picked = await showRssImportConfirm(
+        // ignore: use_build_context_synchronously
+        rootContext,
+        sources: outcome.sources,
+        existingUrls: <String>{
+          for (final RssSource s in existingAll) s.sourceUrl,
+        },
+      );
+      if (picked == null || picked.isEmpty) return;
+      final ({int added, int updated}) result =
+          await RssStore.instance.merge(picked);
+      messenger?.showSnackBar(
+        SnackBar(
+          content: Text('已导入订阅源：新增 ${result.added} 个，更新 ${result.updated} 个'),
+        ),
+      );
+    } catch (e) {
+      messenger?.showSnackBar(SnackBar(content: Text('导入订阅源失败：$e')));
+    }
+  }
+
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    DeepLinkIntake.instance.pendingSourceUrl.removeListener(_onDeepLink);
+    DeepLinkIntake.instance.pendingRssSourceUrl.removeListener(_onRssDeepLink);
     unawaited(_subscription?.cancel());
     super.dispose();
   }
@@ -133,6 +221,98 @@ class _TtsReaderAppState extends State<TtsReaderApp> with WidgetsBindingObserver
           autoSpeak: true,
           fromExternalApp: true,
         ),
+      ),
+    );
+  }
+
+  /// 深链进来一条书源链接：弹确认 → 勾选页 → 导入
+  ///
+  /// 和浏览器里点「一键导入」走同一条路（`_offerBookSourceImport` 那套），
+  /// 区别只是触发源不同：那边是网页点击，这里是系统把我们拉起来。
+  Future<void> _openSourceImport(String src) async {
+    final NavigatorState? navigator = _navigatorKey.currentState;
+    if (navigator == null) {
+      if (_pendingRetries < 10) {
+        _pendingRetries++;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          final String? again = DeepLinkIntake.instance.pendingSourceUrl.value;
+          if (again != null) _openSourceImport(again);
+        });
+      }
+      return;
+    }
+    _pendingRetries = 0;
+    DeepLinkIntake.instance.consume();
+    CrashLog.mark('深链[处理] 书源地址=$src');
+
+    // 句柄在第一个 await 之前取：后面跨 await 再用 context 会被 lint 拦，
+    // 而且 Navigator 重挂时也不该拿旧 context 去弹提示。
+    final ScaffoldMessengerState? messenger =
+        ScaffoldMessenger.maybeOf(navigator.context);
+
+    final bool? ok = await showDialog<bool>(
+      context: navigator.context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('发现书源'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            const Text('这个链接包含一份书源，要导入吗？'),
+            const SizedBox(height: 8),
+            Text(
+              src,
+              maxLines: 4,
+              overflow: TextOverflow.ellipsis,
+              style: Theme.of(dialogContext).textTheme.bodySmall,
+            ),
+          ],
+        ),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('导入'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+
+    final ParseOutcome outcome;
+    try {
+      outcome = await SourceImporter.parse(src);
+    } catch (e) {
+      messenger?.showSnackBar(SnackBar(content: Text('导入失败：$e')));
+      return;
+    }
+    if (outcome.isEmpty) {
+      messenger?.showSnackBar(
+        SnackBar(
+          content: Text(outcome.errors.isEmpty ? '没解析出任何书源' : outcome.errors.first),
+        ),
+      );
+      return;
+    }
+
+    final List<SourceRule> existing = await LegadoSourceStore.instance.load();
+    final List<SourceRule>? picked =
+        await navigator.push<List<SourceRule>>(
+      MaterialPageRoute<List<SourceRule>>(
+        builder: (_) => SourceImportConfirmPage(
+          sources: outcome.rules,
+          localUrls: <String>{for (final SourceRule r in existing) r.url},
+        ),
+      ),
+    );
+    if (picked == null || picked.isEmpty) return;
+    final ({int added, int updated}) result = await applySelectedSources(picked);
+    messenger?.showSnackBar(
+      SnackBar(
+        content: Text('已导入：新增 ${result.added} 个书源，更新 ${result.updated} 个'),
       ),
     );
   }

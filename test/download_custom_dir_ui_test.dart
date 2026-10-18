@@ -1,4 +1,4 @@
-import 'dart:io';
+﻿import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
@@ -37,6 +37,7 @@ void main() {
   setUp(() async {
     SharedPreferences.setMockInitialValues(<String, Object>{
       'tutorial_done': true,
+      'tutorial_content_version': 99,
     });
     StorageService.instance.resetForTest();
     await StorageService.instance.init();

@@ -92,6 +92,26 @@
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:mimeType="text/plain" />
             </intent-filter>
+
+            <!-- 一键导入：网页上的 yuedu:// / legado:// 深链把我们拉起来
+                 （对应阅读 App 那一套；系统会弹「用哪个应用打开」）
+                 ⚠️ host 匹配是**大小写敏感**的，legado 有 /bookSource 和
+                 /booksource 两种写法，所以两个都要声明。
+                 ⚠️ 订阅源那一套的 host 是 `rsssource` / `rssSource`
+                 （真机 2026-10-18 18:39 踩到：只声明 booksource 时，
+                  网页上「喵公子订阅源」按钮点了**根本不会把我们列进候选**）。 -->
+            <intent-filter android:label="导入书源/订阅源">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="yuedu" android:host="booksource" />
+                <data android:scheme="yuedu" android:host="bookSource" />
+                <data android:scheme="yuedu" android:host="rsssource" />
+                <data android:scheme="yuedu" android:host="rssSource" />
+                <data android:scheme="legado" android:host="import" />
+                <data android:scheme="legado" android:host="bookSource" />
+                <data android:scheme="legado" android:host="rssSource" />
+            </intent-filter>
         </activity>
 
         <!-- ============ 启动图标：三个内置样式（activity-alias） ============

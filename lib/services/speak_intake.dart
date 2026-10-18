@@ -3,6 +3,8 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
+import 'deep_link_intake.dart';
+
 /// 文本进入朗读功能的来源（对应 T2S 的几个朗读入口）
 enum SpeakSource {
   /// 打字朗读：用户在应用里手动输入
@@ -102,6 +104,11 @@ class SpeakIntake {
   Future<void> pullPending() async {
     try {
       final Object? raw = await channel.invokeMethod<Object?>('getPending');
+      // 冷启动时可能是一条深链（用户在浏览器点了「一键导入」）
+      if (raw is Map && raw['source'] == 'deeplink') {
+        DeepLinkIntake.instance.fromNative(raw['text'] as String?);
+        return;
+      }
       final SpeakRequest? request = SpeakRequest.fromMap(raw);
       if (request != null) _emit(request);
     } on MissingPluginException {
@@ -139,6 +146,13 @@ class SpeakIntake {
 
   Future<void> _handleCall(MethodCall call) async {
     if (call.method != 'onText') return;
+    // 深链（yuedu:// / legado:// 书源导入）走同一条原生通道，但语义不同：
+    // 它要的是「导入书源」，不是「朗读这段文字」。先在类型上分掉。
+    final Object? args = call.arguments;
+    if (args is Map && args['source'] == 'deeplink') {
+      DeepLinkIntake.instance.fromNative(args['text'] as String?);
+      return;
+    }
     final SpeakRequest? request = SpeakRequest.fromMap(call.arguments);
     if (request != null) _emit(request);
   }

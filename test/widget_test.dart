@@ -1,4 +1,4 @@
-import 'dart:convert';
+﻿import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -23,6 +23,7 @@ void main() {
       // 跳过首次使用教程弹窗（它会盖住界面，挡住这些用例要找的控件）；
       // 教程本身由 tutorial_dialog_test 覆盖
       'tutorial_done': true,
+      'tutorial_content_version': 99,
       'documents': jsonEncode(<Map<String, Object>>[
         <String, Object>{
           'id': '1',

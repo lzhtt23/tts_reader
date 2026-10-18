@@ -1,4 +1,4 @@
-import 'dart:convert';
+﻿import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -15,6 +15,7 @@ void main() {
     // 这些用例测的是文档库本身：把「首次使用教程」标记为已看过，
     // 否则教程弹窗会盖住搜索框，点不到（教程本身由 tutorial_dialog_test 覆盖）。
     'tutorial_done': true,
+    'tutorial_content_version': 99,
     'documents': jsonEncode(<Map<String, Object>>[
       <String, Object>{
         'id': '1',

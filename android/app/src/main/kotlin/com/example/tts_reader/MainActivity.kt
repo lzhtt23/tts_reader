@@ -73,6 +73,19 @@ class MainActivity : AudioServiceActivity() {
             deliverPending()
             return
         }
+        // 深链：yuedu:// / legado:// 书源导入链接（网页上那个「一键导入」按钮）
+        // 浏览器打不开自定义 scheme，只能交给系统；谁声明了这个 scheme 就交给谁。
+        // 我们把整条链接原样推给 Dart，解析/确认/写库都在 Dart 侧做（与
+        // 浏览器里点一键导入走同一条路），这里不做任何判断。
+        val deepLink = intent.data
+        if (intent.action == Intent.ACTION_VIEW && deepLink != null) {
+            val scheme = deepLink.scheme?.lowercase()
+            if (scheme == "yuedu" || scheme == "legado") {
+                pending = payload(deepLink.toString(), "deeplink")
+                deliverPending()
+                return
+            }
+        }
         if (intent.action == Intent.ACTION_VIEW && intent.data != null) {
             // 读取 content:// 可能较慢（文件可能很大），放到后台线程
             val uri = intent.data!!

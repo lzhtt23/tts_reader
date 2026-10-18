@@ -10,6 +10,8 @@ import 'package:permission_handler/permission_handler.dart';
 
 import '../features/pdf_reading/open_reading_screen.dart';
 import '../models/document.dart';
+import '../models/rss_source.dart';
+import '../models/source_rule.dart';
 import '../models/web_link.dart';
 import '../services/auto_sleep.dart';
 import '../services/crash_log.dart';
@@ -17,10 +19,18 @@ import '../services/document_service.dart';
 import '../services/download_list_model.dart';
 import '../services/download_watcher.dart';
 import '../services/file_naming.dart';
+import '../services/legado_source_store.dart';
+import '../services/rss_importer.dart';
+import '../services/rss_store.dart';
+import '../services/source_importer.dart';
+import '../services/source_link_parser.dart';
 import '../services/storage_service.dart';
+import '../widgets/rss_import_confirm.dart';
+import '../pages/source_import_confirm_page.dart';
 import '../services/web_speak_script.dart';
 import '../services/web_theme_script.dart';
 import '../services/web_translate.dart';
+import '../services/yuedu_link_script.dart';
 import '../tts/tts_manager.dart';
 import 'mirror_picker.dart';
 
@@ -2244,6 +2254,24 @@ initialUrlRequest: URLRequest(url: WebUri('about:blank')),
         return null;
       },
     );
+    // yuedu:// / legado:// 链接的 DOM 层拦截（有些站点按钮点了不走导航回调，
+    // 只靠 shouldOverrideUrlLoading 会「点了没反应」）
+    controller.addJavaScriptHandler(
+      handlerName: YueduLinkScript.handlerName,
+      callback: (args) {
+        final String link = args.isNotEmpty && args.first is String
+            ? args.first as String
+            : '';
+        if (link.isEmpty) return null;
+        CrashLog.mark('浏览器[深链点击] $link');
+        if (SourceLinkParser.isRssSourceLink(link)) {
+          unawaited(_offerRssSourceImport(link));
+        } else if (SourceLinkParser.isBookSourceLink(link)) {
+          unawaited(_offerBookSourceImport(link));
+        }
+        return null;
+      },
+    );
   },
   onLoadStart: (controller, url) {
     _updateTab(tab, () {
@@ -2304,6 +2332,13 @@ initialUrlRequest: URLRequest(url: WebUri('about:blank')),
     } catch (_) {
       // 某些页面（about:blank、跨域 iframe 等）不支持注入，忽略
     }
+    // yuedu:// / legado:// 链接拦截：站点那种「一键导入」按钮点了常常
+    // 不走导航回调（真机实测 dy.mgz6.com），所以每页注入一次点击拦截。
+    try {
+      await controller.evaluateJavascript(source: YueduLinkScript.source);
+    } catch (_) {
+      // 注入失败就退回 shouldOverrideUrlLoading 那条路
+    }
     // 主题：只给**这个**标签注入（`_injectTheme` 会遍历全部，这里按 tab 精准做，
     // 免得每加载完一个标签就重复注入所有标签）
     try {
@@ -2334,6 +2369,20 @@ initialUrlRequest: URLRequest(url: WebUri('about:blank')),
         action.request.url?.toString() ?? '';
     final String scheme =
         action.request.url?.scheme.toLowerCase() ?? '';
+
+    // 书源导入链接（yuedu:// / legado://）：拦下来问一句再导，**不静默改用户的书源库**
+    if (SourceLinkParser.isBookSourceLink(target)) {
+      unawaited(_offerBookSourceImport(target));
+      return NavigationActionPolicy.CANCEL;
+    }
+    // 订阅源（RSS）导入链接：同一条路，只是落到订阅源库
+    // （真机日志 02:10 出现过 `legado://import/rssSource?src=…` 落到
+    //  `ERR_UNKNOWN_URL_SCHEME` 错误页 —— 那是没拦它导致的）
+    if (SourceLinkParser.isRssSourceLink(target)) {
+      unawaited(_offerRssSourceImport(target));
+      return NavigationActionPolicy.CANCEL;
+    }
+
     if (scheme == 'intent' ||
         scheme == 'market' ||
         scheme == 'tg' ||
@@ -2364,7 +2413,205 @@ initialUrlRequest: URLRequest(url: WebUri('about:blank')),
   }
 
 
-  /// 浏览器主界面（起始页）：搜索框 + 搜索引擎切换 + 历史 / 收藏夹 / 快捷方式
+  /// 浏览器里点到 `yuedu://` 书源导入链接：确认后再导
+  ///
+  /// ⚠️ **不静默导入**：点一个链接就改用户的书源库，属于越权操作。
+  /// 用户明确点「导入」才走 `SourceImporter`。
+  /// 浏览器里点到 `yuedu://rsssource` / `legado://import/rssSource`：确认后导入订阅源
+  ///
+  /// 与书源那条同构，只是写到 `RssStore`（两套库分开存）。
+  Future<void> _offerRssSourceImport(String link) async {
+    final String? src = SourceLinkParser.extractRssSourceUrl(link);
+    if (!mounted) return;
+    if (src == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('这个订阅源链接里没有可用的地址')),
+      );
+      return;
+    }
+    final bool? ok = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('发现订阅源'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            const Text('这个链接包含订阅源（RSS），要导入吗？'),
+            const SizedBox(height: 8),
+            Text(
+              src,
+              maxLines: 4,
+              overflow: TextOverflow.ellipsis,
+              style: Theme.of(dialogContext).textTheme.bodySmall,
+            ),
+          ],
+        ),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('导入'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+
+    final ScaffoldMessengerState? messenger = ScaffoldMessenger.maybeOf(context);
+    try {
+      final RssParseOutcome outcome = await RssImporter.parse(src);
+      if (outcome.isEmpty) {
+        messenger?.showSnackBar(
+          SnackBar(
+            content: Text(
+              outcome.errors.isEmpty ? '没解析出任何订阅源' : outcome.errors.first,
+            ),
+          ),
+        );
+        return;
+      }
+      // 先给用户勾选（与阅读 App 同款弹窗），确认后才写库
+      final List<RssSource> existingAll = await RssStore.instance.load();
+      if (!mounted) return;
+      final List<RssSource>? picked = await showRssImportConfirm(
+        context,
+        sources: outcome.sources,
+        existingUrls: <String>{
+          for (final RssSource s in existingAll) s.sourceUrl,
+        },
+      );
+      if (picked == null || picked.isEmpty) return;
+      final ({int added, int updated}) result =
+          await RssStore.instance.merge(picked);
+      messenger?.showSnackBar(
+        SnackBar(
+          content: Text('已导入订阅源：新增 ${result.added} 个，更新 ${result.updated} 个'),
+        ),
+      );
+    } catch (e) {
+      messenger?.showSnackBar(SnackBar(content: Text('导入订阅源失败：$e')));
+    }
+  }
+
+  Future<void> _offerBookSourceImport(String link) async {
+    final String? src = SourceLinkParser.extractBookSourceUrl(link);
+    if (!mounted) return;
+    if (src == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('这个书源链接里没有可用的地址')),
+      );
+      return;
+    }
+
+    final bool? ok = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('发现书源'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            const Text('这个链接包含一份书源，要导入吗？'),
+            const SizedBox(height: 8),
+            Text(
+              src,
+              maxLines: 4,
+              overflow: TextOverflow.ellipsis,
+              style: Theme.of(dialogContext).textTheme.bodySmall,
+            ),
+          ],
+        ),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('导入'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+
+    final ParseOutcome outcome;
+    try {
+      outcome = await SourceImporter.parse(src);
+    } catch (e) {
+      if (!mounted) return;
+      await showDialog<void>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('导入失败'),
+          content: Text('$e'),
+          actions: <Widget>[
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: const Text('知道了'),
+            ),
+          ],
+        ),
+      );
+      return;
+    }
+    if (!mounted) return;
+
+    if (outcome.isEmpty) {
+      await showDialog<void>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('导入失败'),
+          content: Text(
+            outcome.errors.isEmpty ? '没解析出任何书源' : outcome.errors.join('\n'),
+          ),
+          actions: <Widget>[
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: const Text('知道了'),
+            ),
+          ],
+        ),
+      );
+      return;
+    }
+
+    // 与订阅页那条路径一致：先让用户勾选要哪些，再写库
+    final List<SourceRule> existing = await LegadoSourceStore.instance.load();
+    if (!mounted) return;
+    final NavigatorState navigator = Navigator.of(context);
+    final List<SourceRule>? picked = await navigator.push<List<SourceRule>>(
+      MaterialPageRoute<List<SourceRule>>(
+        builder: (_) => SourceImportConfirmPage(
+          sources: outcome.rules,
+          localUrls: <String>{for (final SourceRule r in existing) r.url},
+        ),
+      ),
+    );
+    if (!mounted || picked == null || picked.isEmpty) return;
+
+    final ({int added, int updated}) result = await applySelectedSources(picked);
+    if (!mounted) return;
+
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('导入完成'),
+        content: Text('新增 ${result.added} 个书源，更新 ${result.updated} 个'),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('知道了'),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _startPageView() {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;

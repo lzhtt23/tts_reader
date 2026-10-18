@@ -1,4 +1,4 @@
-import 'dart:async';
+﻿import 'dart:async';
 import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
@@ -40,6 +40,7 @@ void main() {
     // 教程本身由 tutorial_dialog_test 覆盖
     SharedPreferences.setMockInitialValues(<String, Object>{
       'tutorial_done': true,
+      'tutorial_content_version': 99,
     });
     StorageService.instance.resetForTest();
     await StorageService.instance.init();

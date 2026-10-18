@@ -54,8 +54,21 @@ bool isUserScrollNotification(ScrollNotification notification) {
   return false;
 }
 
-/// 外推定位的**单轮位移上限**（像素）。
+/// 进入阅读页后该不该把「自己播起来」的朗读停掉
 ///
+/// 用户明确要求：**打开文档不自动朗读**。但真机上换源那一步会把状态推给
+/// 通知栏，随后有东西把它当成「继续播放」（日志 2026-10-18 22:01 每次必现）。
+/// 根因在 TTS 层的状态回推，牵动通知栏/耳机键/PDF 借声，改动风险高，
+/// 所以在页面侧兜一层：进页面前本来没在播、进页面后却播上了 → 停掉。
+///
+/// ⚠️ 「本来就在播」时**必须放行**：换书继续朗读是正常功能。
+@visibleForTesting
+bool shouldPauseAfterOpen({
+  required bool wasPlayingBeforeLoad,
+  required bool nowPlaying,
+}) => !wasPlayingBeforeLoad && nowPlaying;
+
+/// 外推定位的**单轮位移上限**（像素）。
 /// 目标段落很远时 `(target - reference) * perBlock` 会一次算出上万像素
 /// （真机 `43.4 → 11396`），`jumpTo` 直接把画面甩到别处，随后重试又跳回来
 /// —— 用户看到「先闪错、再跳回」。限成 [maxViewports] 个视口高，靠多轮迭代
@@ -675,6 +688,21 @@ class _ReaderPageState extends State<ReaderPage> {
       // 原始结构留一份：自动排版可以撤销，撤销时要换回它。
       // 这份**永远是解析出来的原样**，不能被重排结果覆盖。
       _originalDoc = document;
+      // ★v1.21.97：**打开文档不许自动出声**（用户明确要求）
+      //
+      // 真机日志（2026-10-18 22:01）每次进入阅读页都是这样：
+      // ```
+      // 位置[进入阅读页] …
+      // 媒体控制[activate（换源）tts-manager] hasSession=true playing=false
+      // 媒体控制[pushState] playing=true            ← 自己开始播了
+      // 开始朗读：本地 TTS · multitts 起于 28/12/1
+      // ```
+      // 换源那一步（`terminateForDocumentSwitch` 里的 `activate`）会把状态推给
+      // 通知栏，随后有东西把它当成了「继续播放」。根因在 TTS 层的状态回推，
+      // 那条链牵扯通知栏/耳机键/PDF 借声，改动风险高；这里用一种**可验证**的方式
+      // 兜住：进页面前记下"本来在不在播"，若进页面后自己播起来了，立刻暂停。
+      // 换书时如果**本来就在播**，这条不会触发（wasPlaying = true）。
+      final bool wasPlayingBeforeLoad = _tts.playing;
       _tts.loadDocument(
         finalDoc,
         at: start,
@@ -683,6 +711,19 @@ class _ReaderPageState extends State<ReaderPage> {
       );
       await _tts.setGranularity(ReadGranularity.sentence);
       _buildLayout(finalDoc, start);
+
+      // 拦截「打开文档自己开始朗读」（放在下一帧：让上面那套状态回推先跑完）
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        if (!shouldPauseAfterOpen(
+          wasPlayingBeforeLoad: wasPlayingBeforeLoad,
+          nowPlaying: _tts.playing,
+        )) {
+          return;
+        }
+        CrashLog.mark('自动朗读[拦截] 打开文档时自行开始播放 → 立刻暂停');
+        _tts.pause();
+      });
       // 回写封面与文本层检测结果，避免下次重复解析
       var meta = _meta;
       var changed = false;
@@ -3427,8 +3468,30 @@ class _ReaderPageState extends State<ReaderPage> {
     // 它会立刻结束跟随正在跑的 animateTo —— 不接管就会出现
     // 「animateTo 1ms 后报完成、落点在半路」那种假完成（见 [_scrollOwner]）。
     _takeScrollOwnership('reveal');
+
+    // ★v1.21.97：**不再先空等 6 帧**
+    //
+    // 原来的顺序是「先等 6 帧看锚点 → 没有就外推 10 轮 → 再等 6 帧」。
+    // 真机日志每次都是这样（2026-10-18 21:55）：
+    // ```
+    // 定位开始 块=2917 …
+    // 定位外推 块=2917 锚点 6 帧未建出 → 进入外推（最多 10 轮）
+    // 定位完成 块=2917 第1次尝试 ensureVisible（外推后）
+    // ```
+    // 也就是说前 6 帧**必然**白等：目标段落远到 `ListView.builder` 还没建，
+    // 空等不会让它出现。多出来的约 100ms 就是每句跟随的延迟。
+    //
+    // 现在的顺序是「先摆近似位置 → 再等锚点 → 精确对齐」：
+    // 远端目标第一帧就滚到附近，下一帧它就被建出来了。
+    var anchorContext = _anchors[target]?.currentContext;
+    if (anchorContext == null || !anchorContext.mounted) {
+      _scrollTowardBlock(target, alignment: alignment, instant: true);
+      await _nextFrame();
+      if (!mounted) return;
+      anchorContext = _anchors[target]?.currentContext;
+    }
+
     for (var attempt = 0; attempt < 6; attempt++) {
-      final anchorContext = _anchors[target]?.currentContext;
       if (anchorContext != null && anchorContext.mounted) {
         await Scrollable.ensureVisible(
           anchorContext,
@@ -3445,19 +3508,16 @@ class _ReaderPageState extends State<ReaderPage> {
       }
       await _nextFrame();
       if (!mounted) return;
+      anchorContext = _anchors[target]?.currentContext;
     }
 
-    // 目标段落离视口太远：`ListView.builder` 根本不会把它建出来，
-    // 也就永远没有锚点可用（`ensureVisible` 无能为力）。
-    // 这时按「已建出来的相邻段落」外推一个滚动位置先滚过去，
-    // 滚进可见范围后它就会被构建，于是锚点出现、下一轮再精确对齐。
-    //
-    // 这条路径正是「朗读位置跑很远 / 点别处起读之后，界面不跟」的原因。
+    // 摆过近似位置、又等了几帧还是没有锚点：说明估算落点也不够近，
+    // 继续多轮外推把它拉进来（每轮一次瞬时跳转）。
     //
     // ⚠️ 这里**用瞬时跳转（jumpTo）而不是动画**：外推本身要迭代几轮，
     // 每轮都跑 200ms 动画的话整条定位要一秒多 —— 期间游标早就又往前走了，
     // 于是永远追不上（表现成「点了没反应 / 框乱跳」）。
-    _followLog('定位外推', '块=$target 锚点 6 帧未建出 → 进入外推（最多 10 轮）');
+    _followLog('定位外推', '块=$target 近似位置后仍无锚点 → 继续外推（最多 10 轮）');
     for (var round = 0; round < 10; round++) {
       if (!mounted) return;
       if (_anchors[target]?.currentContext != null) break;
@@ -3743,6 +3803,16 @@ class _ReaderPageState extends State<ReaderPage> {
       '下界=${(geometry.height * _visibleLowerBound).toStringAsFixed(1)} '
       '占位=${(geometry.sentenceTop / geometry.height * 100).toStringAsFixed(0)}%',
     );
+
+    // ★v1.21.97：能量到几何 = 朗读句**确实在本页上**，这时视图位置就该等于朗读位置。
+    //
+    // 之前 `_lastSpot` 只在另一处（要求 `readingPage == displayedPage` 且锚点已建）
+    // 才更新，而跟随经常走「外推」路径，那个条件常常不满足 —— 于是真机日志里
+    // 一直出现 `视图位置=(28,10,0) 朗读位置=(28,12,1)`，两者差两段。
+    // 后果：暂停后退出时进度按"视图位置"写回，位置就退回去了。
+    final spotNow = (cursor.$1, cursor.$2, cursor.$3);
+    if (_lastSpot != spotNow) _lastSpot = spotNow;
+
     if (geometry.sentenceTop <= geometry.height * _visibleUpperBound) {
       // 还在舒服区内 / 已经在上方：不向下滚。上方的情况交给 `_ensureSentenceVisible`
       _followLog('不滚', '句顶在 72% 线以上（舒服区 / 已在上方）→ 交给 _ensureSentenceVisible');

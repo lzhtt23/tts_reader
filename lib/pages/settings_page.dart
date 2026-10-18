@@ -23,6 +23,9 @@ import '../tts/tts_manager.dart';
 import '../widgets/adaptive.dart';
 import '../widgets/speech_diag_export_dialog.dart';
 import 'book_sources_page.dart';
+import 'legado_search_page.dart';
+import 'legado_sources_page.dart';
+import '../models/source_rule.dart';
 import 'text_rules_page.dart';
 
 /// 设置页：外观、朗读引擎、云端配置、语音、语速与音调
@@ -195,6 +198,7 @@ class _SettingsPageState extends State<SettingsPage> {
           _downloadCard(),
           _speechDiagCard(),
           _bookSourcesCard(),
+          _legadoSourcesCard(),
           _browseCard(),
           _tipsCard(tts),
           _diagnosticsCard(),
@@ -1766,6 +1770,38 @@ class _SettingsPageState extends State<SettingsPage> {
         trailing: const Icon(Icons.chevron_right),
         onTap: () => Navigator.of(context).push(
           MaterialPageRoute<void>(builder: (_) => const BookSourcesPage()),
+        ),
+      ),
+    );
+  }
+
+  /// 阅读（legado）格式书源：导入后能真的搜书、抓目录、读正文
+  ///
+  /// 与上面那张卡是**两套独立数据**：
+  /// - 上面那张只存网址（书签），点了用内置浏览器打开
+  /// - 这张存解析规则，由本工程的规则引擎执行
+  Widget _legadoSourcesCard() {
+    return Card.filled(
+      margin: const EdgeInsets.only(bottom: 12),
+      clipBehavior: Clip.antiAlias,
+      child: ListTile(
+        leading: const Icon(Icons.auto_stories),
+        title: const Text('书源（阅读格式）'),
+        subtitle: const Text('导入 legado 书源，直接搜书并朗读正文'),
+        trailing: const Icon(Icons.chevron_right),
+        onTap: () => Navigator.of(context).push(
+          MaterialPageRoute<void>(
+            builder: (_) => LegadoSourcesPage(
+              onOpenSearch: (List<SourceRule> usable) {
+                if (usable.isEmpty) return;
+                Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => LegadoSearchPage(sources: usable),
+                  ),
+                );
+              },
+            ),
+          ),
         ),
       ),
     );

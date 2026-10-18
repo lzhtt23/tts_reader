@@ -128,6 +128,7 @@ class StorageService {
   static const String _kBookSources = 'book_sources';
   static const String _kKeepScreenOn = 'keep_screen_on';
   static const String _kTutorialDone = 'tutorial_done';
+  static const String _kTutorialContentVersion = 'tutorial_content_version';
   static const String _kColorSource = 'theme_color_source';
   static const String _kBackgroundImage = 'theme_background_image';
   static const String _kBackgroundImageOpacity = 'theme_bg_opacity';
@@ -373,6 +374,7 @@ class StorageService {
     _audioExportFormat = 'mp3';
     _pdfSentenceAlignment = 0.35;
     _tutorialDone = false;
+    _tutorialContentVersion = 0;
     speechDiagEnabled.value = false;
     _speechDiagToExternal = true;
     _downloadTarget = DownloadTarget.publicDownloads;
@@ -444,6 +446,7 @@ class StorageService {
     _saveCopyFolderName = sp.getString(_kSaveCopyFolderName) ?? '';
     _keepScreenOn = sp.getBool(_kKeepScreenOn) ?? false;
     _tutorialDone = sp.getBool(_kTutorialDone) ?? false;
+    _tutorialContentVersion = sp.getInt(_kTutorialContentVersion) ?? 0;
     // 外观设置
     _useDynamicColor = sp.getBool(_kColorSource) ?? false;
     _backgroundImage = sp.getString(_kBackgroundImage) ?? '';
@@ -1310,6 +1313,21 @@ class StorageService {
     if (_tutorialDone == value) return;
     _tutorialDone = value;
     await (await _sp).setBool(_kTutorialDone, value);
+  }
+
+  /// 用户看过的教程**内容版本号**
+  ///
+  /// 光有 `tutorialDone` 不够：教程内容大改之后（v1.22 加了发现页/订阅源那一大批），
+  /// 老用户已经勾过「不再显示」，永远看不到新内容。
+  /// 所以再记一个版本号：内容版本变高就**再弹一次**。
+  int _tutorialContentVersion = 0;
+
+  int get tutorialContentVersion => _tutorialContentVersion;
+
+  Future<void> setTutorialContentVersion(int value) async {
+    if (_tutorialContentVersion == value) return;
+    _tutorialContentVersion = value;
+    await (await _sp).setInt(_kTutorialContentVersion, value);
   }
 
   // ---------------- 书源（浏览器快捷入口） ----------------

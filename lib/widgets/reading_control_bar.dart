@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
@@ -395,16 +396,16 @@ class _ReadingControlBarState extends State<ReadingControlBar>
                   ),
                 ),
                 const SizedBox(width: 12),
-                _iconButton(
-                  size: 48,
+                _gearButton(
+                  size: 44,
                   tooltip: '下一句',
                   icon: Icons.fast_forward,
                   onPressed: source.onNextSentence,
                 ),
                 const SizedBox(width: 12),
-                _iconButton(
+                _gearButton(
                   key: ReadingControlBar.stopKey,
-                  size: 48,
+                  size: 44,
                   tooltip: '停止并结束朗读',
                   icon: Icons.stop,
                   // 方块键：TXT 是「终止并清空」、PDF 是「只停声」
@@ -412,11 +413,12 @@ class _ReadingControlBarState extends State<ReadingControlBar>
                   onPressed: source.onStop,
                 ),
                 const SizedBox(width: 12),
-                _iconButton(
+                _gearButton(
                   size: 52,
                   tooltip: playing ? '暂停' : '播放',
                   icon: playing ? Icons.pause : Icons.play_arrow,
                   onPressed: source.onPlayPause,
+                  emphasized: true,
                 ),
               ],
             ),
@@ -497,24 +499,115 @@ class _ReadingControlBarState extends State<ReadingControlBar>
     );
   }
 
-  /// 控制栏上的圆形图标按钮
+  /// 齿轮边圆形键（形状 + 配色都照用户给的参考图）
   ///
-  /// [size] 由可用宽度算出来（见上面 LayoutBuilder），并且关掉「最小 48 触控区」——
-  /// 五个按钮并排时那个默认值会把整条顶出屏幕。
-  Widget _iconButton({
+  /// 参考图：**浅灰齿轮 + 深色图标**，播放键是**深灰实心齿轮 + 白色图标**、大一号。
+  /// 颜色**不跟主题走**（用户明确要参考图那个配色），只按亮/暗主题微调一档明度，
+  /// 保证深色条上也能看清形状。
+  Widget _gearButton({
     Key? key,
     required double size,
     required String tooltip,
     required IconData icon,
     required VoidCallback onPressed,
-  }) => IconButton(
-    key: key,
-    tooltip: tooltip,
-    icon: Icon(icon, size: 20),
-    onPressed: onPressed,
-    padding: EdgeInsets.zero,
-    visualDensity: VisualDensity.compact,
-    style: IconButton.styleFrom(tapTargetSize: MaterialTapTargetSize.shrinkWrap),
-    constraints: BoxConstraints.tightFor(width: size, height: 36),
-  );
+    bool emphasized = false,
+  }) {
+    final dark = Theme.of(context).brightness == Brightness.dark;
+    // 浅灰齿轮：暗色主题下稍微提亮，避免和 #2C2C32 的条底糊在一起
+    final pale = dark ? const Color(0xFFD6D8DE) : const Color(0xFFDDE1E5);
+    const ink = Color(0xFF1C1C20);
+    // 播放键：深灰实心 + 白图标（暗色主题下用更浅一档，不然整个看不见）
+    final strong = dark ? const Color(0xFF8A94A3) : const Color(0xFF56606A);
+    const onStrong = Color(0xFFFFFFFF);
+
+    return SizedBox(
+      width: size,
+      height: size,
+      child: Stack(
+        alignment: Alignment.center,
+        children: <Widget>[
+          Positioned.fill(
+            child: CustomPaint(
+              painter: _GearPainter(
+                fill: emphasized ? strong : pale,
+                stroke: emphasized ? null : ink.withOpacity(0.10),
+                strokeWidth: 1.5,
+              ),
+            ),
+          ),
+          IconButton(
+            key: key,
+            tooltip: tooltip,
+            onPressed: onPressed,
+            padding: EdgeInsets.zero,
+            visualDensity: VisualDensity.compact,
+            style: IconButton.styleFrom(
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            ),
+            icon: Icon(
+              icon,
+              size: size * 0.46,
+              color: emphasized ? onStrong : ink,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 齿轮边（12 波瓣）：可以填充，也可以只描边
+class _GearPainter extends CustomPainter {
+  const _GearPainter({
+    required this.fill,
+    this.stroke,
+    this.strokeWidth = 1.5,
+  });
+
+  final Color fill;
+  final Color? stroke;
+  final double strokeWidth;
+
+  static const int lobes = 12;
+  static const double depth = 0.085;
+
+  static Path path(Size size, {double inset = 0}) {
+    final cx = size.width / 2;
+    final cy = size.height / 2;
+    final r = math.min(cx, cy) - inset;
+    final path = Path();
+    for (int i = 0; i <= 360; i += 3) {
+      final a = i * math.pi / 180;
+      final rr = r * (1 - depth + depth * math.cos(lobes * a));
+      final x = cx + rr * math.cos(a);
+      final y = cy + rr * math.sin(a);
+      if (i == 0) {
+        path.moveTo(x, y);
+      } else {
+        path.lineTo(x, y);
+      }
+    }
+    path.close();
+    return path;
+  }
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final p = path(size, inset: 1);
+    canvas.drawPath(p, Paint()..color = fill);
+    final s = stroke;
+    if (s != null) {
+      canvas.drawPath(
+        p,
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = strokeWidth
+          ..color = s,
+      );
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _GearPainter old) =>
+      old.fill != fill || old.stroke != stroke || old.strokeWidth != strokeWidth;
 }

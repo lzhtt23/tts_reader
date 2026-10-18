@@ -9,9 +9,14 @@ import 'package:path_provider/path_provider.dart';
 import '../features/pdf_reading/open_reading_screen.dart';
 import '../features/pdf_reading/pdf_read_session.dart';
 import '../models/document.dart';
+import '../models/source_rule.dart';
+import '../services/crash_log.dart';
 import '../services/document_service.dart';
 import '../services/file_naming.dart';
 import '../services/library_storage.dart';
+import '../services/legado_source_store.dart';
+import '../services/online_book_downloader.dart';
+import '../services/source_client.dart';
 import '../services/speak_intake.dart';
 import '../services/storage_service.dart';
 import '../tts/tts_manager.dart';
@@ -19,6 +24,8 @@ import '../widgets/adaptive.dart';
 import '../widgets/tutorial_dialog.dart';
 import '../widgets/reading_control_bar.dart';
 import 'browser_page.dart';
+import 'discover_page.dart';
+import 'legado_read_page.dart';
 import 'settings_page.dart';
 import 'speak_now_page.dart';
 
@@ -47,6 +54,12 @@ class HomePage extends StatefulWidget {
   /// 左铺开，原来的悬浮按钮会被挤走；放这里位置固定，也不挡列表最后几本。
   /// 用例统一用这个 key 找它（别再按 `FloatingActionButton` + 文字找）。
   static const Key importButtonKey = ValueKey<String>('library-import');
+
+  /// 书架分类栏（本地 / 在线）
+  static const Key shelfTabKey = ValueKey<String>('library-shelf-tab');
+
+  /// 在线书架每行的「下载」键
+  static const Key onlineDownloadKey = ValueKey<String>('online-shelf-download');
 
   /// 「返回朗读页」该跳去哪本书（**纯函数，便于单测钉住**）
   ///
@@ -81,12 +94,41 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> {
-  int _index = 0;
+  // ---------------- Tab 索引（具名常量） ----------------
+  //
+  // ⚠️ 2026-10-18 从硬编码 0/1/2 改成常量：加「发现」页时 `_index` 的用法
+  // 散在 6 处（IndexedStack、_visited、浏览器进度条、AppBar、FAB、宽窄两套
+  // destinations），直接平移数字很容易漏一处。以后再加 Tab 只改这里。
+
+  /// 上次构建时用的 index（导航探针用，避免每帧打日志）
+  int _lastBuiltIndex = -1;
+
+  /// 文档库（本地书架 + 文档列表）
+  static const int _kLibrary = 0;
+
+  /// 发现（搜书源）
+  static const int _kDiscover = 1;
+
+  /// 浏览器（内置网页朗读）
+  static const int _kBrowser = 2;
+
+  /// 设置
+  static const int _kSettings = 3;
+
+  int _index = _kLibrary;
 
   /// 已访问过的 Tab：未访问的页面不构建，避免启动就初始化 WebView
-  final Set<int> _visited = <int>{0};
+  final Set<int> _visited = <int>{_kLibrary};
   List<Document> _documents = const <Document>[];
   bool _loading = true;
+
+  /// 在线书架（`OnlineBookRecord`）：只存元数据，正文按需抓
+  List<OnlineBookRecord> _onlineBooks = const <OnlineBookRecord>[];
+
+  /// 书架分类：0 = 本地书架，1 = 在线书架
+  ///
+  /// 用户要求：搜索栏下面加一个分类栏，第一类本地、第二类在线。
+  int _shelfTab = 0;
 
   /// 文档库排序方式（默认最近阅读优先）
   DocumentSort _sort = DocumentSort.recent;
@@ -182,9 +224,11 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> _load() async {
     final documents = await StorageService.instance.loadDocuments();
+    final online = await LegadoSourceStore.instance.loadBooks();
     if (!mounted) return;
     setState(() {
       _documents = documents;
+      _onlineBooks = online;
       _loading = false;
     });
   }
@@ -355,29 +399,77 @@ class _HomePageState extends State<HomePage> {
     DocumentService.dropCache(await _cacheDir(), document.id);
     // 书签跟着文档一起清理，否则书签面板里会留一堆点不开的条目
     await StorageService.instance.removeDocBookmarksOf(document.id);
+    // 删的是本地那份：把在线书架里指向它的「已下载」标记清掉。
+    // ⚠️ **只清标记，不移出书架**（用户明确要求）——之后点开回到在线阅读。
+    final int cleared =
+        await LegadoSourceStore.instance.detachLocalDocumentByDocumentId(
+      document.id,
+    );
     await _load();
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('已移除「${document.title}」')));
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          cleared > 0
+              ? '已移除「${document.title}」（在线书架里那本还在，点开会在线阅读）'
+              : '已移除「${document.title}」',
+        ),
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     final wide = isWideLayout(context);
+    // 导航探针：只在**真正换页**时记一行，避免每帧刷屏。
+    // 重点看「构建时 index 是多少」——如果点击后出现 index 与目标不符的构建，
+    // 就说明有别的路径改动了 _index（例如某处写死了数字）。
+    if (_lastBuiltIndex != _index) {
+      CrashLog.mark(
+        '导航[构建] index=$_index(${_tabName(_index)}) 上次=$_lastBuiltIndex '
+        '已建=${_visited.map(_tabName).join(",")}',
+      );
+      _lastBuiltIndex = _index;
+    }
     final body = IndexedStack(
       index: _index,
       children: <Widget>[
         _libraryView(),
-        if (_visited.contains(1))
+        if (_visited.contains(_kDiscover))
+          const DiscoverPage()
+        else
+          const SizedBox.shrink(),
+        if (_visited.contains(_kBrowser))
           BrowserPage(key: _browserKey)
         else
           const SizedBox.shrink(),
-        if (_visited.contains(2)) SettingsPage(onOpenUrl: _openInBrowser) else const SizedBox.shrink(),
+        if (_visited.contains(_kSettings))
+          SettingsPage(onOpenUrl: _openInBrowser)
+        else
+          const SizedBox.shrink(),
       ],
     );
     // 浏览器的地址栏与前进/后退已经**渲染在 AppBar 里**（与标题同层），
-    // 所以页面内容不再需要为它让高度 —— 只需要给加载进度条留 2px
-    final below = _index == 1 ? BrowserPage.progressBarHeight : 0.0;
-    final paddedBody = below == 0 ? body : Padding(padding: EdgeInsets.only(top: below), child: body);
+    // 所以页面内容不再需要为它让高度 —— 只需要给加载进度条留 2px。
+    final below = _index == _kBrowser ? BrowserPage.progressBarHeight : 0.0;
+    //
+    // ★v1.21.99：**必须始终用同一个 Padding 包裹**，不能 `below == 0 ? body : Padding(...)`。
+    //
+    // 真机探针日志（2026-10-19 02:09）暴露了后者的问题：
+    // ```
+    // 导航[构建] index=2(浏览器) 上次=0
+    // 页面[发现] initState（首次构建）      ← 切到浏览器时发现页被重建了
+    // 导航[构建] index=3(设置) 上次=2
+    // 页面[发现] initState（首次构建）      ← 切到设置时又重建一次
+    // ```
+    // 原因：切到/离开浏览器时 `below` 在 0 与 2.0 之间变，外层 widget 的**类型**
+    // 跟着在 `IndexedStack` 与 `Padding(IndexedStack)` 之间切换 —— 类型变了，
+    // 整棵子树被卸载重建，四个页面全部重来一遍（既闪、又重复 initState）。
+    // 现在结构恒定，只改 padding 数值。
+    final paddedBody = Padding(
+      padding: EdgeInsets.only(top: below),
+      child: body,
+    );
     final rail = NavigationRail(
       selectedIndex: _index,
       onDestinationSelected: _selectTab,
@@ -387,6 +479,11 @@ class _HomePageState extends State<HomePage> {
           icon: Icon(Icons.library_books_outlined),
           selectedIcon: Icon(Icons.library_books),
           label: Text('文档库'),
+        ),
+        NavigationRailDestination(
+          icon: Icon(Icons.explore_outlined),
+          selectedIcon: Icon(Icons.explore),
+          label: Text('发现'),
         ),
         NavigationRailDestination(
           icon: Icon(Icons.public_outlined),
@@ -405,9 +502,14 @@ class _HomePageState extends State<HomePage> {
         // 标题永远是应用自己的标题：浏览器的地址栏已经移到页面里
         // （主界面在搜索栏上方那一行，见 BrowserPage._addressRow），
         // AppBar 只负责标题，不再塞工具栏。
-        title: Text(switch (_index) { 0 => '文档库', 1 => '浏览器', _ => '设置' }),
+        title: Text(switch (_index) {
+          _kLibrary => '文档库',
+          _kDiscover => '发现',
+          _kBrowser => '浏览器',
+          _ => '设置',
+        }),
         actions: <Widget>[
-          if (_index == 0) ...<Widget>[
+          if (_index == _kLibrary) ...<Widget>[
             // 打字朗读入口
             IconButton(
               tooltip: '打字朗读',
@@ -438,10 +540,10 @@ class _HomePageState extends State<HomePage> {
           ? Row(children: <Widget>[rail, const VerticalDivider(width: 1), Expanded(child: paddedBody)])
           : paddedBody,
       // 胶片（朗读控制栏）从右下角发起：展开时向左延伸成一条（见 ReadingControlBar）
-      floatingActionButton: _index == 0
+      floatingActionButton: _index == _kLibrary
           ? ReadingControlBar(
               onReturnToReading: _openReadingPage,
-              onOpenSettings: () => _selectTab(2),
+              onOpenSettings: () => _selectTab(_kSettings),
               // 迷你条的封面：按文档 id 查库里的封面路径（查不到就用占位图）
               coverPathOf: (documentId) {
                 if (documentId == null || documentId.isEmpty) return null;
@@ -464,6 +566,11 @@ class _HomePageState extends State<HomePage> {
                   label: '文档库',
                 ),
                 NavigationDestination(
+                  icon: Icon(Icons.explore_outlined),
+                  selectedIcon: Icon(Icons.explore),
+                  label: '发现',
+                ),
+                NavigationDestination(
                   icon: Icon(Icons.public_outlined),
                   selectedIcon: Icon(Icons.public),
                   label: '浏览器',
@@ -480,21 +587,42 @@ class _HomePageState extends State<HomePage> {
 
   /// 切换 Tab（底部导航与侧边导航共用）
   void _selectTab(int index) {
+    // 导航探针（用户报「点别的 Tab 会先抽出发现页」）：
+    // 记录「谁请求切到哪、当时在哪、已经建过哪些页」。
+    // 只有真机日志能说清那次闪，所以先把证据留足。
+    CrashLog.mark(
+      '导航[点击] 目标=${_tabName(index)}($index) 当前=${_tabName(_index)}($_index) '
+      '已建=${_visited.map(_tabName).join(",")}',
+    );
     setState(() {
       _index = index;
       _visited.add(index);
     });
-    if (index == 0) _load(); // 浏览器里导入的文档回到文档库时可见
+    CrashLog.mark('导航[切换完成] index=$_index(${_tabName(_index)})');
+    if (index == _kLibrary) _load(); // 浏览器里导入的文档回到文档库时可见
   }
+
+  /// Tab 名字（日志与探针用）
+  String _tabName(int index) => switch (index) {
+    _kLibrary => '文档库',
+    _kDiscover => '发现',
+    _kBrowser => '浏览器',
+    _kSettings => '设置',
+    _ => '未知$index',
+  };
 
   /// 在**应用内浏览器**里打开一个网址（设置页「项目主页」等入口用）
   ///
   /// ⚠️ 顺序有讲究：IndexedStack 里的 BrowserPage 是**懒建**的
-  /// （`_visited` 控制），所以必须先 `_selectTab(1)` 把它建出来，
+  /// （`_visited` 控制），所以必须先切到浏览器 Tab 把它建出来，
   /// 否则 `_browserKey.currentState` 还是 null，`submitAddress` 会落空。
   /// 又因为建出来要等这一帧结束，所以真正打开放在下一帧的回调里。
+  ///
+  /// ⚠️ 这里**必须用 `_kBrowser`，不能写死 1**：加「发现」页之后 1 已经
+  /// 变成发现页了。写死 1 的后果是「从设置里打开网址 → 先闪一下发现页 →
+  /// 浏览器页根本没建出来 → 网址打不开」。
   void _openInBrowser(String url) {
-    _selectTab(1);
+    _selectTab(_kBrowser);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _browserKey.currentState?.submitAddress(url);
     });
@@ -543,30 +671,277 @@ class _HomePageState extends State<HomePage> {
     return Column(
       children: <Widget>[
         _librarySearchBar(),
+        _shelfTabBar(),
         Expanded(
-          child: documents.isEmpty
-              ? _noMatchView()
-              : columns > 1
-              // 平板 / 横屏：文档库改成多列网格，一屏能看更多书
-              ? GridView.builder(
-                  padding: const EdgeInsets.fromLTRB(12, 4, 12, 96),
-                  gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                    crossAxisCount: columns,
-                    crossAxisSpacing: 8,
-                    mainAxisSpacing: 8,
-                    mainAxisExtent: 112,
-                  ),
-                  itemCount: documents.length,
-                  itemBuilder: (context, index) => _documentCard(documents[index]),
-                )
-              : ListView.builder(
-                  padding: const EdgeInsets.fromLTRB(12, 4, 12, 96),
-                  itemCount: documents.length,
-                  itemBuilder: (context, index) => _documentCard(documents[index]),
-                ),
+          child: _shelfTab == 0
+              ? (documents.isEmpty
+                    ? _noMatchView()
+                    : columns > 1
+                    // 平板 / 横屏：文档库改成多列网格，一屏能看更多书
+                    ? GridView.builder(
+                        padding: const EdgeInsets.fromLTRB(12, 4, 12, 96),
+                        gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                          crossAxisCount: columns,
+                          crossAxisSpacing: 8,
+                          mainAxisSpacing: 8,
+                          mainAxisExtent: 112,
+                        ),
+                        itemCount: documents.length,
+                        itemBuilder: (context, index) =>
+                            _documentCard(documents[index]),
+                      )
+                    : ListView.builder(
+                        padding: const EdgeInsets.fromLTRB(12, 4, 12, 96),
+                        itemCount: documents.length,
+                        itemBuilder: (context, index) =>
+                            _documentCard(documents[index]),
+                      ))
+              : _onlineShelfView(),
         ),
       ],
     );
+  }
+
+  /// 书架分类栏：本地书架 / 在线书架
+  ///
+  /// 用 `SegmentedButton` 而不是 TabBar：两个分类是**同一页的两种视图**，
+  /// 不是两套独立页面；Segmented 也更符合「筛选」的语义，且窄屏不挤。
+  Widget _shelfTabBar() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 0, 12, 6),
+      child: Row(
+        children: <Widget>[
+          Expanded(
+            child: SegmentedButton<int>(
+              key: HomePage.shelfTabKey,
+              showSelectedIcon: false,
+              segments: <ButtonSegment<int>>[
+                ButtonSegment<int>(
+                  value: 0,
+                  icon: const Icon(Icons.folder_outlined, size: 18),
+                  label: Text('本地书架（${_documents.length}）'),
+                ),
+                ButtonSegment<int>(
+                  value: 1,
+                  icon: const Icon(Icons.cloud_outlined, size: 18),
+                  label: Text('在线书架（${_onlineBooks.length}）'),
+                ),
+              ],
+              selected: <int>{_shelfTab},
+              onSelectionChanged: (Set<int> v) => setState(() => _shelfTab = v.first),
+              style: const ButtonStyle(
+                visualDensity: VisualDensity.compact,
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 在线书架列表
+  Widget _onlineShelfView() {
+    final ThemeData theme = Theme.of(context);
+    if (_onlineBooks.isEmpty) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              Icon(Icons.cloud_outlined, size: 64, color: theme.colorScheme.outline),
+              const SizedBox(height: 12),
+              Text('在线书架是空的', style: theme.textTheme.titleMedium),
+              const SizedBox(height: 6),
+              Text(
+                '去「发现」搜一本书，在详情页点「放入书架」',
+                textAlign: TextAlign.center,
+                style: theme.textTheme.bodySmall,
+              ),
+              const SizedBox(height: 16),
+              FilledButton.tonalIcon(
+                onPressed: () => _selectTab(_kDiscover),
+                icon: const Icon(Icons.explore_outlined, size: 18),
+                label: const Text('去发现'),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    return ListView.builder(
+      padding: const EdgeInsets.fromLTRB(12, 4, 12, 96),
+      itemCount: _onlineBooks.length,
+      itemBuilder: (context, index) {
+        final OnlineBookRecord book = _onlineBooks[index];
+        return Card.filled(
+          margin: const EdgeInsets.only(bottom: 12),
+          clipBehavior: Clip.antiAlias,
+          child: ListTile(
+            leading: Icon(Icons.cloud_outlined, color: theme.colorScheme.primary),
+            title: Text(book.name, maxLines: 2, overflow: TextOverflow.ellipsis),
+            subtitle: Row(
+              children: <Widget>[
+                if (book.isDownloaded) ...<Widget>[
+                  // 已经整本下好了：点开读本地那份，不再联网
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                    decoration: BoxDecoration(
+                      color: theme.colorScheme.secondaryContainer,
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                    child: Text(
+                      '已下载',
+                      style: theme.textTheme.labelSmall?.copyWith(
+                        color: theme.colorScheme.onSecondaryContainer,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                ],
+                Expanded(
+                  child: Text(
+                    <String>[
+                      if (book.author.trim().isNotEmpty) book.author.trim(),
+                      if (book.chapterName.trim().isNotEmpty)
+                        '读到：${book.chapterName.trim()}',
+                    ].join(' · '),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.bodySmall,
+                  ),
+                ),
+              ],
+            ),
+            trailing: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: <Widget>[
+                // 下载键（用户要求：在线书架每行要有下载）
+                IconButton(
+                  key: HomePage.onlineDownloadKey,
+                  tooltip: '下载整本',
+                  icon: const Icon(Icons.download_outlined),
+                  onPressed: () => _downloadOnlineBook(book),
+                ),
+                IconButton(
+                  tooltip: '从书架移除',
+                  icon: const Icon(Icons.remove_circle_outline),
+                  onPressed: () => _removeOnlineBook(book),
+                ),
+              ],
+            ),
+            onTap: () => _openOnlineBook(book),
+          ),
+        );
+      },
+    );
+  }
+
+  /// 从在线书架移除（只删记录，不动本地文件）
+  Future<void> _removeOnlineBook(OnlineBookRecord book) async {
+    await LegadoSourceStore.instance.removeBook(book.url);
+    await _load();
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('已从在线书架移除「${book.name}」')),
+    );
+  }
+
+  /// 打开在线书架里的一本
+  ///
+  /// **优先本地**（用户要求）：如果这本已经整本下载过，就直接打开本地那份，
+  /// 不再联网解析 —— 已经下好的书再去在线抓一遍既慢又可能失败。
+  /// 本地那份若已被用户删掉，就退回在线阅读。
+  Future<void> _openOnlineBook(OnlineBookRecord book) async {
+    if (book.isDownloaded) {
+      final List<Document> docs = await StorageService.instance.loadDocuments();
+      Document? local;
+      for (final Document d in docs) {
+        if (d.id == book.localDocumentId) {
+          local = d;
+          break;
+        }
+      }
+      if (!mounted) return;
+      if (local != null) {
+        await _open(local);
+        return;
+      }
+      // 本地文件被删了：退回在线读，并顺手清掉那条失效标记
+      await LegadoSourceStore.instance.attachLocalDocument(
+        bookUrl: book.url,
+        documentId: '',
+      );
+      if (!mounted) return;
+    }
+
+    final SourceRule? rule =
+        await OnlineBookDownloader.sourceOf(book.sourceUrl);
+    if (!mounted) return;
+    if (rule == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('这个书源已经被删了，读不了这本')),
+      );
+      return;
+    }
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => LegadoReadPage(
+          source: rule,
+          book: OnlineBook(
+            name: book.name,
+            url: book.url,
+            author: book.author,
+            coverUrl: book.coverUrl,
+            lastChapter: book.chapterName,
+          ),
+          initialChapter: book.chapterIndex,
+        ),
+      ),
+    );
+    if (mounted) await _load();
+  }
+
+  /// 在线书架里的「下载」键：整本拉下来进文档库
+  ///
+  /// 与详情页那个下载共用 [OnlineBookDownloader]，进度会出现在
+  /// 发现页的「下载列表」里。
+  Future<void> _downloadOnlineBook(OnlineBookRecord book) async {
+    final SourceRule? rule =
+        await OnlineBookDownloader.sourceOf(book.sourceUrl);
+    if (!mounted) return;
+    if (rule == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('这个书源已经被删了，下不了这本')),
+      );
+      return;
+    }
+    final ScaffoldMessengerState messenger = ScaffoldMessenger.of(context);
+    messenger.showSnackBar(
+      SnackBar(content: Text('开始下载「${book.name}」，进度见发现页的下载列表')),
+    );
+    try {
+      await OnlineBookDownloader.download(
+        source: rule,
+        book: OnlineBook(
+          name: book.name,
+          url: book.url,
+          author: book.author,
+          coverUrl: book.coverUrl,
+          lastChapter: book.chapterName,
+        ),
+      );
+      messenger.showSnackBar(
+        SnackBar(content: Text('「${book.name}」已下载，加入文档库')),
+      );
+    } catch (e) {
+      messenger.showSnackBar(
+        SnackBar(content: Text('下载失败：$e')),
+      );
+    }
+    if (mounted) await _load();
   }
 
   /// 文档库搜索栏
