@@ -1,5 +1,56 @@
 # 更新日志
 
+## v1.22.12（2026-10-19）
+
+**修：下载下来是 `.bin`，打不开**
+
+用户从 `annas-archive.gl/slow_download/<hash>/` 下载，拿到的是 `.bin` 文件。
+
+### 原因
+那个地址**路径里没有文件名**，服务器也没给 `Content-Disposition`，
+下载器只能兜底存成 `.bin` —— 内容是好的 PDF，但我们按**扩展名**判格式，
+于是判成「不支持朗读」，用户看到「下载完成但打不开」。
+
+### 修法：按文件头纠正扩展名
+新增 `normalizeDownloadedName()`，在**判格式之前**先看前 8 字节：
+* `%PDF` → `.pdf`
+* `PK\x03\x04` → `.epub`
+* 能按文本解（无 NUL、几乎无控制字符）→ `.txt`
+* 认不出 → **保持原名**，不乱改
+
+细节：
+* 是**改名**不是复制（同盘 rename，瞬间完成）
+* 目标文件已存在时不覆盖，改用带时间戳的名字
+* 浏览器页与后台扫描**两条路都先过这一步**
+* 顺手放宽一处：改名成功说明我们读写过该文件，这时就算 MediaStore 查不到也照样导入
+
+* `test/download_name_normalize_test.dart` + 7 条
+
+## v1.22.11（2026-10-19）
+
+**修：网页里的 `<select>` 点了没反应（选不了语言）**
+
+用户报「点这个下拉框弹不出选择语言窗口」，页面是 `annas-archive.gl`。
+
+### 原因
+Android WebView 的 `<select>` 靠 `WebChromeClient` 弹系统选择器，
+而 `flutter_inappwebview` 这层**没把它接出来** —— 表现就是点了毫无反应。
+
+### 修法：自己接管
+* 注入 `WebSelectBridge`：捕获阶段拦下 `pointerdown / touchstart / mousedown / click`
+  （同一控件 500ms 内去重，免得一次点击弹四个面板）
+* 把选项通过 JS handler 传给 Flutter，弹 **Material 单选面板**：
+  选项超过 12 个自动带筛选框，当前项打勾
+* 选完回写页面：设 `selectedIndex` 并派发 `input` + `change`，
+  站点自己的 `onchange` 照常触发
+
+### 对着真实页面核对过
+抓了 `annas-archive.gl` 的 HTML：**4 个原生 `<select>`，每个 65 个选项**，
+`onchange="handleChangeLang(event)"` 里读的是 `event.target.value` ——
+所以写 `selectedIndex` + 派发 `change` 正好能触发它的跳转。
+
+* `test/web_select_bridge_test.dart` + 8 条
+
 ## v1.22.10（2026-10-19）
 
 **波浪条参数按官方 Compose 实现对齐 + 波浪开始漂移**

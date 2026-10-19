@@ -25,8 +25,14 @@ import 'storage_service.dart';
 /// **不抛异常**（调用方可能是后台扫描，没有界面可以报错）。
 Future<Document?> importDownloadedFile(String path) async {
   try {
-    if (!DocumentType.isReadable(path)) return null;
-    final String? real = await locateDownloadedFile(path);
+    // ★v1.22.12：**先按文件头把名字纠正过来**
+    //
+    // `annas-archive.gl` 那种 `/slow_download/<hash>/` 地址没有文件名，
+    // 服务器不给 `Content-Disposition`，下载器只能兜底存成 `.bin` ——
+    // 于是"下载完成"但格式判不出来，用户拿到的是一坨打不开的东西。
+    final String normalized = await normalizeDownloadedName(path);
+    if (!DocumentType.isReadable(normalized)) return null;
+    final String? real = await locateDownloadedFile(normalized);
     if (real == null) {
       CrashLog.mark('下载导入：找不到文件，跳过（$path）');
       return null;
@@ -107,6 +113,93 @@ Future<Document?> importDownloadedFile(String path) async {
     CrashLog.mark('下载文件导入失败（$path）：$e');
     return null;
   }
+}
+
+/// 按**文件头**纠正下载文件的扩展名（`.bin` → `.pdf` / `.epub` / `.txt`）
+///
+/// ## 为什么需要
+///
+/// 有些下载地址根本没有文件名，例如 `annas-archive.gl/slow_download/<hash>/`。
+/// 如果服务器也不再给 `Content-Disposition`，下载器只能兜底叫 `xxx.bin` ——
+/// 内容是好的 PDF，但按扩展名判"不可朗读"，用户看到的就是「下载完成但打不开」。
+///
+/// ## 判据
+///
+/// 只看前 8 字节（够认魔数，也不会为校验去读整本大文件）：
+/// * `%PDF` → pdf
+/// * `PK\x03\x04` → epub（zip 容器；进一步看有没有 `mimetype` 才算 epub，
+///   这里先按 epub 认，真解析时还会再校验一次）
+/// * 能按 UTF-8 解出来且没有 NUL 字节 → txt
+///
+/// 名字**已经是对的就原样返回**，不改名；改名失败也原样返回（不影响后续）。
+Future<String> normalizeDownloadedName(String path) async {
+  try {
+    final File file = File(path);
+    if (!await file.exists()) return path;
+    final String lower = path.toLowerCase();
+    // 已经是能识别的扩展名：不动
+    for (final String ext in <String>['.pdf', '.epub', '.txt']) {
+      if (lower.endsWith(ext)) return path;
+    }
+
+    final RandomAccessFile raf = await file.open();
+    late final List<int> head;
+    try {
+      head = await raf.read(8);
+    } finally {
+      await raf.close();
+    }
+    if (head.isEmpty) return path;
+    final String magic = _magicOf(head);
+
+    String? ext;
+    // ⚠️ `_magicOf` 返回的是**给人看**的字符串（'PDF(%PDF)' / 'ZIP/PK(epub 等)'），
+    // 所以这里用前缀判断，不能拿 'PDF' 去全等比较。
+    if (magic.startsWith('PDF')) {
+      ext = 'pdf';
+    } else if (magic.startsWith('ZIP')) {
+      ext = 'epub';
+    } else if (_looksLikeText(head)) {
+      ext = 'txt';
+    }
+    if (ext == null) {
+      CrashLog.mark('下载改名：认不出格式（头=$magic），保持原名（$path）');
+      return path;
+    }
+
+    // 去掉原扩展名后接上正确的（`book.bin` → `book.pdf`）
+    final String base = path.contains('.')
+        ? path.substring(0, path.lastIndexOf('.'))
+        : path;
+    final String target = '$base.$ext';
+    if (target == path) return path;
+    if (await File(target).exists()) {
+      // 目标已存在就不覆盖，换个带序号的
+      final String stamped = '$base-${DateTime.now().millisecondsSinceEpoch}.$ext';
+      await file.rename(stamped);
+      CrashLog.mark('下载改名：$path → $stamped（头=$magic）');
+      return stamped;
+    }
+    await file.rename(target);
+    CrashLog.mark('下载改名：$path → $target（头=$magic）');
+    return target;
+  } catch (e) {
+    CrashLog.mark('下载改名失败（$path）：$e');
+    return path;
+  }
+}
+
+/// 前几个字节看起来像文本吗（没有 NUL、不是控制字符为主）
+bool _looksLikeText(List<int> head) {
+  if (head.isEmpty) return false;
+  var bad = 0;
+  for (final int b in head) {
+    if (b == 0) return false; // 有 NUL：二进制
+    // 允许 \t \n \r 和可打印 ASCII
+    if (b == 0x09 || b == 0x0A || b == 0x0D) continue;
+    if (b < 0x20) bad++;
+  }
+  return bad <= 1;
 }
 
 /// 给刚入库的文档补一张封面（解析不出来就当失败，不影响入库）

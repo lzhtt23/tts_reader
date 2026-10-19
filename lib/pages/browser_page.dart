@@ -27,9 +27,11 @@ import '../services/source_link_parser.dart';
 import '../services/storage_service.dart';
 import '../widgets/download_done_card.dart';
 import '../widgets/rss_import_confirm.dart';
+import '../widgets/web_select_sheet.dart';
 import '../pages/source_import_confirm_page.dart';
 import '../services/web_speak_script.dart';
 import '../services/web_theme_script.dart';
+import '../services/web_select_bridge.dart';
 import '../services/web_translate.dart';
 import '../services/yuedu_link_script.dart';
 import '../tts/tts_manager.dart';
@@ -1820,7 +1822,10 @@ class _BrowserPageState extends State<BrowserPage> {
   /// 还能一键「立即朗读」（后台扫描没有界面，给不了这个）。
   Future<void> _onDownloaded(String path, String fileName) async {
     final messenger = ScaffoldMessenger.of(context);
-    if (!DocumentType.isReadable(path)) {
+    // 先按文件头纠正扩展名：有些地址不给文件名（`/slow_download/<hash>/`），
+    // 下载器只能兜底存成 `.bin`，内容是好的 PDF 却按扩展名判成"不支持"。
+    final String named = await normalizeDownloadedName(path);
+    if (!DocumentType.isReadable(named)) {
       messenger.showSnackBar(
         SnackBar(
             content: Text('已下载：$fileName（该格式暂不支持朗读，仅支持 PDF / EPUB / TXT）')),
@@ -1828,7 +1833,11 @@ class _BrowserPageState extends State<BrowserPage> {
       return;
     }
     // 公共下载目录在部分系统上应用读不到（MediaStore 归属问题），先确认文件真的能读
-    final found = await locateDownloadedFile(path, fileName: fileName);
+    final located =
+        await locateDownloadedFile(named, fileName: FileNaming.baseName(named));
+    // 改名成功说明我们**能读写这个文件**（改名前刚做过 rename），
+    // 那种情况就算 MediaStore 查不到也照样能导入，不该卡在这里。
+    final found = located ?? (named != path ? named : null);
     if (found == null) {
       messenger
           .showSnackBar(SnackBar(content: Text('已下载到：$path（应用读不到该位置，未导入文档库）')));
@@ -1862,6 +1871,64 @@ class _BrowserPageState extends State<BrowserPage> {
         },
       ),
     );
+  }
+
+  /// 网页 `<select>`：弹出 Flutter 选择面板，选完回写页面
+  ///
+  /// 参数结构（JS 侧 `WebSelectBridge.source` 产生）：
+  /// `{id, label, multiple, options: [{index, text, selected, disabled}]}`
+  Future<void> _showWebSelect(Map<String, dynamic> data) async {
+    final String id = (data['id'] as String?) ?? '';
+    if (id.isEmpty) return;
+    final String label = (data['label'] as String?) ?? '';
+    final bool multiple = data['multiple'] == true;
+    final List<dynamic> rawOptions =
+        (data['options'] as List<dynamic>?) ?? const <dynamic>[];
+
+    final List<String> texts = <String>[];
+    int? selectedIndex;
+    final List<int> selectedIndexes = <int>[];
+    for (final dynamic item in rawOptions) {
+      if (item is! Map) continue;
+      final Map<String, dynamic> option = Map<String, dynamic>.from(item);
+      final int index = (option['index'] as num?)?.toInt() ?? texts.length;
+      final String text = (option['text'] as String?) ?? '';
+      texts.add(text.isEmpty ? '（空）' : text);
+      if (option['selected'] == true) {
+        selectedIndex ??= index;
+        selectedIndexes.add(index);
+      }
+    }
+    if (texts.isEmpty) return;
+    if (!mounted) return;
+
+    final List<int>? picked = await showModalBottomSheet<List<int>>(
+      context: context,
+      showDragHandle: true,
+      isScrollControlled: true,
+      builder: (_) => WebSelectSheet(
+        label: label,
+        options: texts,
+        multiple: multiple,
+        currentIndex: selectedIndex,
+        currentIndexes: selectedIndexes,
+      ),
+    );
+    if (picked == null || picked.isEmpty || !mounted) return;
+
+    final InAppWebViewController? web = _web;
+    if (web == null) return;
+    try {
+      await web.evaluateJavascript(
+        source: WebSelectBridge.applyScript(
+          id: id,
+          index: multiple ? null : picked.first,
+          multiIndexes: multiple ? picked : null,
+        ),
+      );
+    } catch (_) {
+      // 页面可能已经跳走了，忽略
+    }
   }
 
   /// 下载列表（**Chrome 式**：进度条 + 分组 + 按状态给动作）
@@ -2271,6 +2338,18 @@ initialUrlRequest: URLRequest(url: WebUri('about:blank')),
         return null;
       },
     );
+    // 网页 <select>：插件没把原生选择器接出来（真机上「点语言下拉没反应」），
+    // 这里接管 —— 由 Flutter 弹面板，选完回写页面。
+    controller.addJavaScriptHandler(
+      handlerName: WebSelectBridge.handlerName,
+      callback: (args) {
+        final dynamic raw = args.isEmpty ? null : args.first;
+        if (raw is Map) {
+          unawaited(_showWebSelect(Map<String, dynamic>.from(raw)));
+        }
+        return null;
+      },
+    );
   },
   onLoadStart: (controller, url) {
     _updateTab(tab, () {
@@ -2337,6 +2416,12 @@ initialUrlRequest: URLRequest(url: WebUri('about:blank')),
       await controller.evaluateJavascript(source: YueduLinkScript.source);
     } catch (_) {
       // 注入失败就退回 shouldOverrideUrlLoading 那条路
+    }
+    // 网页 <select> 接管（原生选择器在插件这层没接出来）
+    try {
+      await controller.evaluateJavascript(source: WebSelectBridge.source);
+    } catch (_) {
+      // 注入失败：select 就还是点不动，但不影响其它功能
     }
     // 主题：只给**这个**标签注入（`_injectTheme` 会遍历全部，这里按 tab 精准做，
     // 免得每加载完一个标签就重复注入所有标签）
