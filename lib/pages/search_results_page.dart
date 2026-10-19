@@ -6,6 +6,7 @@ import '../models/source_rule.dart';
 import '../services/book_merge.dart';
 import '../services/legado_source_store.dart';
 import '../services/source_client.dart';
+import '../widgets/wavy_progress.dart';
 import 'book_intro_page.dart';
 
 /// 搜索结果页
@@ -233,16 +234,22 @@ class _SearchResultsPageState extends State<SearchResultsPage> {
 
     if (merged.isEmpty && _searching) {
       return Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: <Widget>[
-            const CircularProgressIndicator(),
-            const SizedBox(height: 12),
-            Text(
-              '正在 ${_active.length} 个书源里找…',
-              style: theme.textTheme.bodySmall,
-            ),
-          ],
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 48),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              // 聚合搜索加载：MD3 波浪进度
+              LinearWavyProgressIndicator(
+                semanticsLabel: '正在 ${_active.length} 个书源里找',
+              ),
+              const SizedBox(height: 14),
+              Text(
+                '正在 ${_active.length} 个书源里找…',
+                style: theme.textTheme.bodySmall,
+              ),
+            ],
+          ),
         ),
       );
     }

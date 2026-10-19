@@ -413,32 +413,59 @@ class SourceClient {
     required Future<String> Function(OnlineChapter chapter) chapterLoader,
     int maxChapters = 30,
     void Function(int done, int total)? onProgress,
+    int concurrency = 4,
+    Map<String, String>? cache,
   }) async {
     final List<OnlineChapter> take = chapters.length > maxChapters
         ? chapters.sublist(0, maxChapters)
         : chapters;
 
-    final List<Chapter> built = <Chapter>[];
-    for (var i = 0; i < take.length; i++) {
-      final OnlineChapter chapter = take[i];
-      try {
-        final String text = await chapterLoader(chapter);
-        built.add(_toChapter(chapter.name, text));
-      } catch (_) {
-        // 单章失败：留一个占位章，避免整本打不开
-        built.add(
-          Chapter(
+    // ★v1.22.1：**并发抓**，原来是纯串行
+    //
+    // 真机上 20 章串行要十几秒（每章一次 HTTP + 解析），并发 4 之后快了约 3 倍。
+    // 顺序必须保持：结果按下标放进 `built`，不按完成先后 —— 否则章节会乱序。
+    // 并发上限压得比较低（默认 4）：书源站点多半扛不住太多并发，
+    // 且并发过高更容易被反爬拦。
+    final int limit = concurrency <= 0 ? 1 : concurrency;
+    final List<Chapter?> built = List<Chapter?>.filled(take.length, null);
+    var done = 0;
+    var next = 0;
+
+    Future<void> worker() async {
+      while (true) {
+        final int i = next++;
+        if (i >= take.length) return;
+        final OnlineChapter chapter = take[i];
+        try {
+          // 同一章已经在缓存里就直接用（翻窗口回来时不重复请求）
+          final String? hit = cache?[chapter.url];
+          final String text = hit ?? await chapterLoader(chapter);
+          cache?[chapter.url] = text;
+          built[i] = _toChapter(chapter.name, text);
+        } catch (_) {
+          // 单章失败：留一个占位章，避免整本打不开
+          built[i] = Chapter(
             title: chapter.name,
             paragraphs: const <Paragraph>[
               Paragraph(sentences: <Sentence>[Sentence('（本章获取失败）')]),
             ],
-          ),
-        );
+          );
+        }
+        done++;
+        onProgress?.call(done, take.length);
       }
-      onProgress?.call(i + 1, take.length);
     }
 
-    return StructuredDocument(chapters: built);
+    await Future.wait(<Future<void>>[
+      for (var k = 0; k < limit; k++) worker(),
+    ]);
+
+    return StructuredDocument(
+      chapters: <Chapter>[
+        for (final Chapter? c in built)
+          c ?? const Chapter(title: '', paragraphs: <Paragraph>[]),
+      ],
+    );
   }
 
   Chapter _toChapter(String title, String text) {

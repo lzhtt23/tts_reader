@@ -1,9 +1,12 @@
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
+import 'package:path_provider/path_provider.dart';
 
 import '../models/document.dart';
 import '../models/source_rule.dart';
+import 'cover_fetch.dart';
+import 'crash_log.dart';
 import 'legado_source_store.dart';
 import 'library_storage.dart';
 import 'online_download_records.dart';
@@ -26,7 +29,38 @@ import 'storage_service.dart';
 class OnlineBookDownloader {
   OnlineBookDownloader._();
 
+  /// 已经整本下载过的话，返回它在文档库里的 id（否则 null）
+  ///
+  /// 会顺手校验本地文档是否还在：书架上标着「已下载」但文件被人删了，
+  /// 就把标记清掉并返回 null —— 那种情况应该允许重新下载。
+  static Future<String?> downloadedDocId(String bookUrl) async {
+    final List<OnlineBookRecord> books =
+        await LegadoSourceStore.instance.loadBooks();
+    OnlineBookRecord? record;
+    for (final OnlineBookRecord b in books) {
+      if (b.url == bookUrl && b.isDownloaded) {
+        record = b;
+        break;
+      }
+    }
+    final String? docId = record?.localDocumentId;
+    if (docId == null || docId.isEmpty) return null;
+    final List<Document> docs = await StorageService.instance.loadDocuments();
+    final bool exists = docs.any((Document d) => d.id == docId);
+    if (!exists) {
+      await LegadoSourceStore.instance.attachLocalDocument(
+        bookUrl: bookUrl,
+        documentId: '',
+      );
+      return null;
+    }
+    return docId;
+  }
+
   /// 下载整本，返回写入文档库的 documentId
+  ///
+  /// **不重复下载**：这本已经整本下过（且本地文件还在）就直接返回原文档 id，
+  /// 不再抓一遍 —— 用户明确要求「已下载的书不可重复下载」。
   ///
   /// [onProgress] 每章回调一次 `(已下章数, 总章数)`，总章数在取到目录后才会 > 0。
   /// 失败会抛异常，调用方负责提示；记账（records）在这里做，不用调用方管。
@@ -37,6 +71,11 @@ class OnlineBookDownloader {
     @visibleForTesting
     SourceClient? clientOverride,
   }) async {
+    final String? already = await downloadedDocId(book.url);
+    if (already != null) {
+      CrashLog.mark('在线下载[跳过] 已下载过 ${book.name}');
+      return already;
+    }
     final OnlineDownloadRecord record =
         OnlineDownloadRecords.instance.start(source: source, book: book);
     final SourceClient client = clientOverride ?? SourceClient(rule: source);
@@ -91,6 +130,15 @@ class OnlineBookDownloader {
         ),
       );
       OnlineDownloadRecords.instance.finish(record, docId, failed: failed);
+
+      // ★v1.22.2：**封面优先用在线详情页那张**
+      //
+      // 下载下来的是 TXT，本身没有图片；只靠排版画的封面不如原书封面。
+      // 而下载它的那个详情页是有封面的（`ruleBookInfo.coverUrl`），
+      // 这里顺手抓一张存成文档封面。抓不到就不管 —— 之后 `extractCover`
+      // 还会走文字封面那条路，不会出现"没封面"。
+      await _attachRemoteCover(docId: docId, book: book);
+
       // 如果这本在在线书架里，记下「已下载」指向哪个本地文档：
       // 之后从书架点开就直接读本地那份，不再联网解析。
       await LegadoSourceStore.instance.attachLocalDocument(
@@ -103,6 +151,36 @@ class OnlineBookDownloader {
       rethrow;
     } finally {
       if (clientOverride == null) client.dispose();
+    }
+  }
+
+  /// 把在线详情页的封面抓下来挂到刚生成的文档上
+  ///
+  /// 失败一律忽略（封面是装饰，不该影响"书已经下好了"这个事实）。
+  static Future<void> _attachRemoteCover({
+    required String docId,
+    required OnlineBook book,
+  }) async {
+    try {
+      final String coverUrl = book.coverUrl.trim();
+      if (coverUrl.isEmpty) return;
+      // 与 home_page 那边补封面用的是同一个目录约定
+      final Directory base = await getApplicationDocumentsDirectory();
+      final String outPath =
+          '${base.path}${Platform.pathSeparator}covers'
+          '${Platform.pathSeparator}$docId.jpg';
+      final String? saved = await CoverFetcher.fetchTo(coverUrl, outPath);
+      if (saved == null) return;
+
+      final List<Document> docs =
+          await StorageService.instance.loadDocuments();
+      for (final Document d in docs) {
+        if (d.id != docId) continue;
+        await StorageService.instance.upsertDocument(d.copyWith(coverPath: saved));
+        break;
+      }
+    } catch (_) {
+      // 封面失败不影响下载结果
     }
   }
 

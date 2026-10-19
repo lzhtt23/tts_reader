@@ -25,6 +25,7 @@ import '../services/rss_store.dart';
 import '../services/source_importer.dart';
 import '../services/source_link_parser.dart';
 import '../services/storage_service.dart';
+import '../widgets/download_done_card.dart';
 import '../widgets/rss_import_confirm.dart';
 import '../pages/source_import_confirm_page.dart';
 import '../services/web_speak_script.dart';
@@ -1842,25 +1843,23 @@ class _BrowserPageState extends State<BrowserPage> {
       return;
     }
     if (!mounted) return;
-    messenger.showSnackBar(
-      SnackBar(
-        content: Text('已下载并导入文档库：${document.title}'),
-        duration: const Duration(seconds: 6),
-        action: SnackBarAction(
-          label: '立即朗读',
-          onPressed: () {
-            if (!mounted) return;
-            Navigator.of(context).push(
-              MaterialPageRoute<void>(
-                // ⚠️ 必须走分派，不能直接开 ReaderPage：
-                // 这里下载的文档**任意类型都可能是**（`DocumentType.isReadable` 过就造），
-                // 下载一本 PDF 点「立即朗读」会掉进 ReaderPage 的旧路径 ——
-                // 而那条路径正在被删除（PDF 已改为独立的 PdfReadingPage）。
-                builder: (_) => openReadingScreen(document),
-              ),
-            );
-          },
-        ),
+    // 方案 4：悬浮卡（倒计时圆环 3 秒自动收起 + 立即朗读 / 关闭）
+    unawaited(
+      showDownloadDoneCard(
+        context,
+        bookName: document.title,
+        onRead: () {
+          if (!mounted) return;
+          Navigator.of(context).push(
+            MaterialPageRoute<void>(
+              // ⚠️ 必须走分派，不能直接开 ReaderPage：
+              // 这里下载的文档**任意类型都可能是**（`DocumentType.isReadable` 过就造），
+              // 下载一本 PDF 点「立即朗读」会掉进 ReaderPage 的旧路径 ——
+              // 而那条路径正在被删除（PDF 已改为独立的 PdfReadingPage）。
+              builder: (_) => openReadingScreen(document),
+            ),
+          );
+        },
       ),
     );
   }

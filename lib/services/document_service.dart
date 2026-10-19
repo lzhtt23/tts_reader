@@ -23,6 +23,7 @@ import '../models/document.dart';
 import '../models/pdf_line_box.dart';
 import '../models/structured_document.dart';
 import 'crash_log.dart';
+import 'cover_renderer.dart';
 import 'document_cache.dart';
 import 'epub_toc.dart';
 import 'file_naming.dart';
@@ -1325,12 +1326,82 @@ class DocumentService {
           final extracted = await _extractPdfCover(document, outPath);
           if (extracted != null) return extracted;
         case DocumentType.txt:
-          break; // 没有图源，直接走默认样式
+          // ★v1.22.1：TXT 也要有封面
+          //
+          // 现状核对过：TXT 原来走到 `break` → `writeDefaultCover`，
+          // 而那个函数用 `image` 包自带的**位图 ASCII 字体**画书名，
+          // 中文一个字也画不出来 → 用户看到的就是一块纯色、没有书名。
+          // TXT 本身没有内嵌图片，所以只能自己排版：这里先试 TXT 头部的
+          // 「书名/作者」行，再交给 [CoverRenderer] 用 Flutter 排版引擎画（支持中文）。
+          final meta = await _readTxtHeaderMeta(document.path);
+          final rendered = await CoverRenderer.render(
+            title: meta.title ?? document.title,
+            author: meta.author ?? '',
+            outPath: outPath,
+          );
+          if (rendered != null) return rendered;
       }
     } catch (_) {
       // 抽取失败不影响功能，落到默认样式
     }
     return writeDefaultCover(document.title, outPath);
+  }
+
+  /// 从 TXT 开头几行里认「书名 / 作者」
+  ///
+  /// 中文 TXT 常见的头部约定：
+  /// ```
+  /// 书名：钢铁是怎样炼成的
+  /// 作者：奥斯特洛夫斯基
+  /// ```
+  /// 或者只有一行书名。认不出来就返回 null（调用方用文件名）。
+  ///
+  /// 只读前 4KB：TXT 可能几百 MB，不能整个读进来。
+  static Future<({String? title, String? author})> _readTxtHeaderMeta(
+    String path,
+  ) async {
+    try {
+      final File file = File(path);
+      if (!await file.exists()) return (title: null, author: null);
+      final RandomAccessFile raf = await file.open();
+      try {
+        final int length = await raf.length();
+        final int take = length > 4096 ? 4096 : length;
+        final Uint8List bytes = await raf.read(take);
+        // 编码未知：先按 UTF-8 宽松解，解出乱码也没关系（只用来认「书名：」这种标记）
+        final String head = utf8.decode(bytes, allowMalformed: true);
+        String? title;
+        String? author;
+        for (final String rawLine in head.split('\n').take(20)) {
+          final String line = rawLine.replaceAll('\uFEFF', '').trim();
+          if (line.isEmpty) continue;
+          final String? t = _afterMarker(line, const <String>['书名', '名称', '作品名']);
+          if (t != null && t.isNotEmpty) title ??= t;
+          final String? a = _afterMarker(line, const <String>['作者', '著者']);
+          if (a != null && a.isNotEmpty) author ??= a;
+          if (title != null && author != null) break;
+        }
+        return (title: title, author: author);
+      } finally {
+        await raf.close();
+      }
+    } catch (_) {
+      return (title: null, author: null);
+    }
+  }
+
+  /// `书名：xxx` / `书名:xxx` / `书名 xxx` → `xxx`
+  static String? _afterMarker(String line, List<String> markers) {
+    for (final String marker in markers) {
+      if (!line.startsWith(marker)) continue;
+      final String rest = line.substring(marker.length).trim();
+      final String cleaned = rest.replaceFirst(RegExp(r'^[：:～~\-\s]+'), '').trim();
+      if (cleaned.isEmpty) return null;
+      // 「作者简介」这种不是作者行
+      if (cleaned.length > 40) return null;
+      return cleaned;
+    }
+    return null;
   }
 
   /// EPUB 自带封面（v1.21.17 第 3 件：**手动解 OPF 优先**）

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../services/online_download_records.dart';
+import 'wavy_progress.dart';
 
 /// 在线书下载列表（发现页那个「下载列表」入口）
 ///
@@ -96,7 +97,7 @@ class OnlineDownloadsSheet extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: <Widget>[
               const SizedBox(height: 4),
-              LinearProgressIndicator(
+              LinearWavyProgressIndicator(
                 value: r.status == OnlineDownloadStatus.done ? 1 : r.fraction,
               ),
               const SizedBox(height: 4),

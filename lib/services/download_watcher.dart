@@ -94,12 +94,40 @@ Future<Document?> importDownloadedFile(String path) async {
       importedAt: DateTime.now(),
     );
     await StorageService.instance.upsertDocument(document);
+    // ★v1.22.8：**入库时就把封面做出来**
+    //
+    // 原来只有「文件选择器导入」那条路会补封面，
+    // 浏览器下载 / 后台扫描进来的书没有封面，文档库里是一块空白占位。
+    // 这里补上（失败不影响入库：封面只是装饰）。
+    await attachCoverFor(document);
     CrashLog.mark('下载完成并已导入文档库：${document.title}（来源=$real）');
     return document;
   } catch (e) {
     // 后台扫描不能因为一个文件失败就整体中断
     CrashLog.mark('下载文件导入失败（$path）：$e');
     return null;
+  }
+}
+
+/// 给刚入库的文档补一张封面（解析不出来就当失败，不影响入库）
+///
+/// 下载进来的书可能是 PDF / EPUB / TXT 任何一种：
+/// * EPUB 抽自带封面
+/// * PDF 抽第一页
+/// * TXT 没有图源 → 由 `DocumentService` 排版生成（支持中文书名）
+Future<void> attachCoverFor(Document document) async {
+  if ((document.coverPath ?? '').isNotEmpty) return;
+  try {
+    final Directory dir = await getApplicationDocumentsDirectory();
+    final String outPath = '${dir.path}/covers/${document.id}.jpg';
+    final String? cover = await DocumentService.extractCover(document, outPath);
+    if (cover == null) return;
+    await StorageService.instance.upsertDocument(
+      document.copyWith(coverPath: cover),
+    );
+    CrashLog.mark('封面生成：${document.title}');
+  } catch (e) {
+    CrashLog.mark('封面生成失败（${document.title}）：$e');
   }
 }
 

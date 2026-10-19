@@ -231,6 +231,30 @@ class _HomePageState extends State<HomePage> {
       _onlineBooks = online;
       _loading = false;
     });
+    // 保险：老文档（在「下载入库补封面」之前进来的）可能还没有封面，
+    // 这里顺手补一轮。每本只试一次（`_coverTried`），失败不会反复重试。
+    unawaited(_backfillMissingCovers(documents));
+  }
+
+  /// 本次会话里已经试过补封面的文档（避免每次刷新都重试失败项）
+  final Set<String> _coverTried = <String>{};
+
+  /// 给「没有封面」的文档补封面（串行，最多 [maxPerRound] 本）
+  ///
+  /// 为什么要限量：文档库可能有一堆旧书，一次全解析会卡住界面
+  /// （PDF 抽封面要真渲染一页）。
+  Future<void> _backfillMissingCovers(
+    List<Document> documents, {
+    int maxPerRound = 3,
+  }) async {
+    var done = 0;
+    for (final Document d in documents) {
+      if (done >= maxPerRound) break;
+      if ((d.coverPath ?? '').isNotEmpty) continue;
+      if (!_coverTried.add(d.id)) continue;
+      done++;
+      await _backfillCover(d);
+    }
   }
 
   /// 解析缓存目录（删除文档时用来清缓存；拿不到就返回空串）
@@ -819,11 +843,18 @@ class _HomePageState extends State<HomePage> {
               mainAxisSize: MainAxisSize.min,
               children: <Widget>[
                 // 下载键（用户要求：在线书架每行要有下载）
+                // 已整本下好的**置灰**：不能再下一次（用户要求不可重复下载）
                 IconButton(
                   key: HomePage.onlineDownloadKey,
-                  tooltip: '下载整本',
-                  icon: const Icon(Icons.download_outlined),
-                  onPressed: () => _downloadOnlineBook(book),
+                  tooltip: book.isDownloaded ? '已下载' : '下载整本',
+                  icon: Icon(
+                    book.isDownloaded
+                        ? Icons.download_done
+                        : Icons.download_outlined,
+                  ),
+                  onPressed: book.isDownloaded
+                      ? null
+                      : () => _downloadOnlineBook(book),
                 ),
                 IconButton(
                   tooltip: '从书架移除',
@@ -909,6 +940,17 @@ class _HomePageState extends State<HomePage> {
   /// 与详情页那个下载共用 [OnlineBookDownloader]，进度会出现在
   /// 发现页的「下载列表」里。
   Future<void> _downloadOnlineBook(OnlineBookRecord book) async {
+    // 已下载过就别再抓一遍（用户要求「已下载的书不可重复下载」）
+    final String? existing =
+        await OnlineBookDownloader.downloadedDocId(book.url);
+    if (!mounted) return;
+    if (existing != null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('「${book.name}」已经下载过了，去文档库里读')),
+      );
+      await _load();
+      return;
+    }
     final SourceRule? rule =
         await OnlineBookDownloader.sourceOf(book.sourceUrl);
     if (!mounted) return;
