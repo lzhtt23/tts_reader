@@ -43,17 +43,45 @@ Future<void> main() async {
   GbkDecoderInstaller.install();
   // 本地设置（文档库、TTS 配置、主题）与朗读调度中心
   await StorageService.instance.init();
-  await TtsManager.instance.init();
-  // 解析缓存目录先求出来：等第一次打开文档时，用户正等着解析出结果，
-  // 那时再做平台通道往返等于把耗时直接加到首屏（见 DocumentService.warmUpCacheDirectory）
-  await DocumentService.warmUpCacheDirectory();
+  // ★v1.22.23（低性能设备优化）：这三件事**互不依赖**，并行做
+  //
+  // 原来是一个接一个 await：StorageService → TtsManager → 解析缓存目录 → 下载器，
+  // 每步都有平台通道往返。低端平板上串起来就是好几百毫秒的首屏白屏。
+  await Future.wait(<Future<void>>[
+    TtsManager.instance.init(),
+    // 解析缓存目录先求出来：等第一次打开文档时，用户正等着解析出结果，
+    // 那时再做平台通道往返等于把耗时直接加到首屏
+    // （见 DocumentService.warmUpCacheDirectory）
+    DocumentService.warmUpCacheDirectory(),
+    _initDownloader(),
+  ]);
   CrashLog.mark('存储与朗读管理器初始化完成');
-  // 下载器必须在 runApp 之前初始化（仅 Android / iOS 支持，其它平台忽略）
+  // ★v1.22.23：音频服务/媒体键/外部文本**不挡首屏**
+  //
+  // 它们只影响"开始朗读"和"分享进来的文本"，首屏列表根本用不到。
+  // 放到第一帧之后再做：用户看到列表的时间早了，实际功能一点没少
+  // （点书 → 阅读页 → 点朗读，至少几百毫秒之后，那时早就装好了）。
+  runApp(const TtsReaderApp());
+  WidgetsBinding.instance.addPostFrameCallback((_) {
+    unawaited(_initDeferredServices());
+  });
+  // 后台下载收尾扫描（v1.21.40）：用户可能在浏览器页发起下载后就退到桌面 /
+  // 杀掉应用 —— 那时页面前台轮询已经停了，下载跑完不会入库。
+  // 启动时扫一遍，配合回前台那一次（见 didChangeAppLifecycleState）。
+  unawaited(DownloadWatcher.instance.sweep());
+}
+
+/// 下载器初始化（Android / iOS 才有；桌面 / 测试环境忽略）
+Future<void> _initDownloader() async {
   try {
     await FlutterDownloader.initialize(debug: false);
   } catch (_) {
     // 桌面 / Web 无对应实现，忽略
   }
+}
+
+/// 首帧之后才需要的东西：后台音频服务、媒体键、外部文本入口、复制即朗读
+Future<void> _initDeferredServices() async {
   // 后台朗读 + 通知栏控制：注册前台服务与媒体通知
   await TtsAudioHandler.init();
   // 耳机 / 平板媒体键兜底：平板有些 ROM 不走 MediaSession，
@@ -68,12 +96,7 @@ Future<void> main() async {
   // 复制即朗读：读一次配置；开关开着但悬浮球没跑起来时补拉一次
   // （同时兜住「开机自启被系统拦掉」的情况：打开一次应用就恢复）
   unawaited(C2sController.instance.bootstrap());
-  CrashLog.mark('音频服务与外部文本入口初始化完成，准备 runApp');
-  runApp(const TtsReaderApp());
-  // 后台下载收尾扫描（v1.21.40）：用户可能在浏览器页发起下载后就退到桌面 /
-  // 杀掉应用 —— 那时页面前台轮询已经停了，下载跑完不会入库。
-  // 启动时扫一遍，配合回前台那一次（见 didChangeAppLifecycleState）。
-  unawaited(DownloadWatcher.instance.sweep());
+  CrashLog.mark('音频服务与外部文本入口初始化完成');
 }
 
 /// 桃花源阅读器：Material 3 + 动态取色种子 0xFF6750A4，支持亮 / 暗色

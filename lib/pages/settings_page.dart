@@ -60,6 +60,10 @@ class SettingsPage extends StatefulWidget {
   /// 「允许其它媒体打断朗读」开关
   static const Key mediaInterruptKey = ValueKey<String>('settings-media-interrupt');
 
+  /// master 开关：「耳机控制失效诊断和修复」（展开下面四项）
+  static const Key headsetToolsKey =
+      ValueKey<String>('settings-headset-tools');
+
   /// 「以媒体身份占音频焦点」开关（修耳机键）
   static const Key mediaFocusModeKey =
       ValueKey<String>('settings-media-focus-mode');
@@ -541,50 +545,23 @@ class _SettingsPageState extends State<SettingsPage> {
               ),
             ),
           ),
-        ],
-      ),
-    );
-  }
-
-  // ---------------- 引擎 ----------------
-
-  Widget _engineCard(TtsManager tts) {
-    return Card.filled(
-      margin: const EdgeInsets.only(bottom: 12),
-      clipBehavior: Clip.antiAlias,
-      child: Column(
-        children: <Widget>[
-          ListTile(
-            leading: const Icon(Icons.record_voice_over_outlined),
-            title: const Text('朗读引擎'),
-            subtitle: Text(tts.activeEngineName),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () => _pickEngine(tts),
-          ),
           const Divider(height: 1),
-          ListTile(
-            leading: const Icon(Icons.phone_android_outlined),
-            title: const Text('本地 TTS 引擎'),
-            subtitle: Text(
-              tts.localEngines.isEmpty
-                  ? '这台设备只报告了一个可用本地引擎'
-                  : '当前：${tts.localEngineLabel} · 共 ${tts.localEngines.length} 个可选',
+          // ★v1.22.23：这四项只在「诊断和修复」打开时才显示 —— 平时设置页保持干净。
+          // 关闭只是隐藏，已保存的开关值不受影响。
+          SwitchListTile(
+            key: SettingsPage.headsetToolsKey,
+            secondary: const Icon(Icons.headset_mic_outlined),
+            value: storage.headsetToolsVisible,
+            title: const Text('耳机控制失效诊断和修复'),
+            subtitle: const Text(
+              '耳机按键无效时打开，展开诊断与修复选项（音量键切句 / 媒体焦点 / 音频输出 / 诊断）。',
             ),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: tts.localEngines.isEmpty ? null : () => _pickLocalEngine(tts),
+            onChanged: (bool value) async {
+              await storage.setHeadsetToolsVisible(value);
+              if (mounted) setState(() {});
+            },
           ),
-          const Divider(height: 1),
-          ListTile(
-            leading: const Icon(Icons.cloud_outlined),
-            title: const Text('云端 TTS 配置'),
-            subtitle: Text(
-              tts.cloudConfigured ? '已配置：${tts.cloudBaseUrl}' : '未配置（兼容 OpenAI 语音接口）',
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-            ),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () => _configureCloud(tts),
-          ),
+          if (storage.headsetToolsVisible) ...<Widget>[
           const Divider(height: 1),
           // 物理键替代方案：有的平板根本不把耳机/蓝牙媒体键交给第三方应用
           // （真机 2026-10-19：诊断页连一条按键记录都没有）。音量键一定送得到。
@@ -647,6 +624,51 @@ class _SettingsPageState extends State<SettingsPage> {
             subtitle: const Text('看耳机/平板按键有没有到应用'),
             trailing: const Icon(Icons.chevron_right),
             onTap: _showMediaKeyDiagnostics,
+          ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  // ---------------- 引擎 ----------------
+
+  Widget _engineCard(TtsManager tts) {
+    return Card.filled(
+      margin: const EdgeInsets.only(bottom: 12),
+      clipBehavior: Clip.antiAlias,
+      child: Column(
+        children: <Widget>[
+          ListTile(
+            leading: const Icon(Icons.record_voice_over_outlined),
+            title: const Text('朗读引擎'),
+            subtitle: Text(tts.activeEngineName),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => _pickEngine(tts),
+          ),
+          const Divider(height: 1),
+          ListTile(
+            leading: const Icon(Icons.phone_android_outlined),
+            title: const Text('本地 TTS 引擎'),
+            subtitle: Text(
+              tts.localEngines.isEmpty
+                  ? '这台设备只报告了一个可用本地引擎'
+                  : '当前：${tts.localEngineLabel} · 共 ${tts.localEngines.length} 个可选',
+            ),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: tts.localEngines.isEmpty ? null : () => _pickLocalEngine(tts),
+          ),
+          const Divider(height: 1),
+          ListTile(
+            leading: const Icon(Icons.cloud_outlined),
+            title: const Text('云端 TTS 配置'),
+            subtitle: Text(
+              tts.cloudConfigured ? '已配置：${tts.cloudBaseUrl}' : '未配置（兼容 OpenAI 语音接口）',
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => _configureCloud(tts),
           ),
         ],
       ),

@@ -131,6 +131,24 @@ class DocumentParseTask {
     return DocumentParseTask._(null, completer, cachePath: cachePath);
   }
 
+  /// 异步完成（**不阻塞主线程**）：用于「在 isolate 里读解析缓存」
+  ///
+  /// ★v1.22.23（低性能设备优化）：原来缓存是**在主线程同步读**的 ——
+  /// 一本 60 万字的书，JSON 解码 + 重建章节在低端平板上能卡住好几百毫秒，
+  /// 表现就是「点书之后界面一动不动」。放到 isolate 里读，UI 不再掉帧。
+  factory DocumentParseTask.deferred(
+    Future<ParseResult> future,
+    String cachePath,
+  ) {
+    final completer = Completer<ParseResult>();
+    future.then<void>(
+      completer.complete,
+      onError: (Object error, StackTrace stack) =>
+          completer.completeError(error, stack),
+    );
+    return DocumentParseTask._(null, completer, cachePath: cachePath);
+  }
+
   final ReceivePort? _receivePort;
   final Completer<ParseResult> _completer;
 
@@ -310,8 +328,26 @@ class DocumentService {
         ? null
         : '$cacheDir${Platform.pathSeparator}${DocumentCache.fileNameFor(document.id)}';
     if (cachePath != null) {
-      final cached = _readCache(document, cachePath, onProgress);
-      if (cached != null) return DocumentParseTask.cached(cached, cachePath);
+      // ★v1.22.23：先做一次**极轻**的存在性检查（一次 stat），
+      // 命中则把「读 + 解码」整个扔进 isolate，主线程不卡；
+      // 未命中照旧起解析 isolate（那本来就是 isolate 里跑的）。
+      bool exists = false;
+      try {
+        exists = File(cachePath).existsSync();
+      } catch (_) {
+        exists = false;
+      }
+      if (exists) {
+        return DocumentParseTask.deferred(
+          _readCachedAsync(
+            document,
+            cachePath,
+            onProgress: onProgress,
+            coverOutPath: coverOutPath,
+          ),
+          cachePath,
+        );
+      }
     }
     return _spawnParse(
       document,
@@ -319,6 +355,31 @@ class DocumentService {
       coverOutPath: coverOutPath,
       cachePath: cachePath,
     );
+  }
+
+  /// 在 isolate 里读缓存；缓存不可用（版本不符 / 损坏 / 空）时退回真解析
+  static Future<ParseResult> _readCachedAsync(
+    Document document,
+    String cachePath, {
+    void Function(ParseProgress)? onProgress,
+    String? coverOutPath,
+  }) async {
+    ParseResult? cached;
+    try {
+      // 闭包只捕获可跨 isolate 的值（Document 本来就要进解析 isolate）
+      cached = await Isolate.run(() => _readCache(document, cachePath, null));
+    } catch (_) {
+      cached = null;
+    }
+    if (cached != null) {
+      onProgress?.call(const ParseProgress(1, '读取缓存'));
+      return cached;
+    }
+    // 缓存文件在、但内容不可用：退回正常解析（不阻塞，仍在 isolate 里）
+    final ParseResult parsed =
+        await _spawnParse(document, coverOutPath: coverOutPath, cachePath: cachePath)
+            .result;
+    return parsed;
   }
 
   /// 尝试读缓存；未命中返回 null（调用方照常起 isolate 真解析）
