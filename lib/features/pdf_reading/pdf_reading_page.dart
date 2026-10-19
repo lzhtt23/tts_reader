@@ -502,8 +502,15 @@ class PdfReadingPageState extends State<PdfReadingPage>
   }
 
   Future<void> _open() async {
+    // ★v1.22.24 计时（走 logcat 的 flutter 行，真机直接量，不用导日志）
+    final Stopwatch sw = Stopwatch()..start();
+    void stage(String name) {
+      // ignore: avoid_print
+      print('PDF_OPEN $name ${sw.elapsedMilliseconds}ms');
+    }
     try {
       final doc = await PdfDocument.openFile(widget.filePath);
+      stage('pdfrx-open');
       if (!mounted) {
         await doc.dispose();
         return;
@@ -551,6 +558,7 @@ class PdfReadingPageState extends State<PdfReadingPage>
           );
         },
       );
+      stage('session-open');
       if (!mounted) return;
       // ★★ v1.21.43 · 第 4 步：**恢复之后**再对齐一次闸门（单一真相源 = _session.current）
       //
@@ -559,10 +567,13 @@ class PdfReadingPageState extends State<PdfReadingPage>
       // 所以这里必须**按恢复后的位置**再对齐一次，否则：
       //   · 朗读从 21 开始，画面停在 15（真机两次复现的 6 页/1 页偏差）；
       //   · `_userDriven` 万一被程序化滚动置真，后续跟读会被静默挡下。
+      // 进场居中重新武装（重进 / 换书都要）
+      _firstCenterPending = true;
       _syncGateToSession();
       // 首页的文本层先备好，用户一点就有反应
       final startIndex = _session.current?.pageIndex ?? 0;
-      unawaited(_session.ensureLayer(startIndex));
+      unawaited(_session.ensureLayer(startIndex).then((_) => stage('first-layer')));
+      stage('ready-for-frame');
       unawaited(_loadOutline());
       // ⚠️ §4.100 任务 D 症状②/③：新实例（从文档库重进 / 结束朗读后重进）
       // 必须把画面带到会话当前页 —— 原来 initState 只认了 `_lastSettledPage`，
@@ -650,6 +661,12 @@ class PdfReadingPageState extends State<PdfReadingPage>
   /// **真机判据**：连读十几句，`AF[turnTo开始]` 只应在**进入阅读页那一拍**出现一次。
   static const bool useSentenceCenterFollow = true;
 
+  /// 页面刚打开、还没做过「进场居中」
+  ///
+  /// 只为进场那一拍服务：第一句要突破死区强制居中（见 `onSentenceChanged`），
+  /// 之后仍按日常跟读的死区/让位规则走。
+  bool _firstCenterPending = true;
+
   @override
   void onSentenceChanged(PdfSentenceRef ref) {
     if (!mounted) return;
@@ -668,7 +685,18 @@ class PdfReadingPageState extends State<PdfReadingPage>
     // 不等任何秒数）。它是第一道闸；`centerOnSentence` 内部还有第二道。
     if (!_userScrolling) {
       if (useSentenceCenterFollow) {
-        centerOnSentence(ref);
+        // ★v1.22.24 修「从文档库进入 PDF，朗读句不在中间」
+        //
+        // 真机（平板，2026-10-19）：恢复位置后页面停在 alignment=0.15 的位置，
+        // 而朗读句常常在页面下半部分 → 开屏就"看不见在读哪句"。
+        //
+        // 原因是进场这一拍走的是默认参数（forceCenter=false）：
+        // 死区判定认为"已经够近"，于是**不滚**（日志 `死区=内 → 不滚`）。
+        // 进场属于 sentence_centering 文档里写明的「首次进入 → forceCenter=true」
+        // 场景，第一句必须无条件对齐到中间。
+        final bool firstCenter = _firstCenterPending;
+        _firstCenterPending = false;
+        centerOnSentence(ref, forceCenter: firstCenter);
       } else {
         _turnToWithRetry(ref.pageIndex);
       }

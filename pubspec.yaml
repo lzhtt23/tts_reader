@@ -1,7 +1,7 @@
 name: tts_reader
 description: 桃花源阅读器 —— 支持 PDF / EPUB / TXT 导入、系统与云端 TTS 朗读的 Material 3 应用
 publish_to: 'none'
-version: 1.22.23+185
+version: 1.22.24+186
 
 environment:
   # Flutter 3.22+ （ColorScheme.surfaceContainer* 与 Records 语法）
