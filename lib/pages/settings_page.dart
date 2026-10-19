@@ -23,6 +23,7 @@ import '../tts/tts_manager.dart';
 import '../widgets/adaptive.dart';
 import '../widgets/speech_diag_export_dialog.dart';
 import '../services/media_key_diagnostics.dart';
+import '../services/reading_notice.dart';
 import 'book_sources_page.dart';
 import 'legado_search_page.dart';
 import 'legado_sources_page.dart';
@@ -515,6 +516,24 @@ class _SettingsPageState extends State<SettingsPage> {
               await storage.setAllowMediaInterrupt(value);
               // 立即按新设置重新配置音频属性（不用重启应用）
               await MediaInterruptionController.instance.applySettings();
+              if (mounted) setState(() {});
+            },
+          ),
+          const Divider(height: 1),
+          SwitchListTile(
+            key: const ValueKey<String>('settings-reading-notice'),
+            secondary: const Icon(Icons.notifications_active_outlined),
+            value: storage.readingNoticeEnabled,
+            title: const Text('\u6717\u8bfb\u63a7\u5236\u901a\u77e5'),
+            subtitle: const Text(
+              '\u5728\u901a\u77e5\u680f\u663e\u793a\u4e00\u6761\u5e26'
+              '\u300c\u4e0a\u4e00\u53e5 / \u64ad\u653e\u6682\u505c / \u4e0b\u4e00\u53e5 / '
+              '\u505c\u6b62\u300d\u7684\u63a7\u5236\u6761\uff08\u4e0d\u4f9d\u8d56'
+              '\u8033\u673a\u4e0e\u5a92\u4f53\u4f1a\u8bdd\uff09\u3002',
+            ),
+            onChanged: (bool value) async {
+              await storage.setReadingNoticeEnabled(value);
+              if (!value) await ReadingNotice.hide();
               if (mounted) setState(() {});
             },
           ),

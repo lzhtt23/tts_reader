@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import 'crash_log.dart';
+import 'storage_service.dart';
 
 /// 朗读控制通知（自定义样式，**不走 MediaStyle / 媒体会话**）
 ///
@@ -61,6 +62,7 @@ class ReadingNotice {
     final String key = '$title|$detail|$playing';
     if (key == _lastKey) return;
     _lastKey = key;
+    if (!StorageService.instance.readingNoticeEnabled) return;
     try {
       if (!await _ensurePermission()) {
         CrashLog.mark('朗读通知[无权限] 已跳过（Android 13+ 需通知权限）');

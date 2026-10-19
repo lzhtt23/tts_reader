@@ -137,6 +137,7 @@ class StorageService {
   static const String _kAudioAnchor = 'audio_anchor_enabled';
   static const String _kMediaFocusMode = 'audio_media_focus_mode';
   static const String _kHeadsetTools = 'settings_headset_tools_visible';
+  static const String _kReadingNotice = 'reading_notice_enabled';
 
   /// 导出朗读音频的格式（★v1.21.45 改动 5）：`mp3`（默认）或 `wav`
   ///
@@ -266,6 +267,9 @@ class StorageService {
   /// 设置页是否展开「耳机控制失效诊断和修复」下的四项（默认收起）
   bool _headsetToolsVisible = false;
 
+  /// show the custom reading-control notification (v1.22.40)
+  bool _readingNoticeEnabled = true;
+
   /// 导出音频格式（存扩展名字符串；默认 mp3 —— 见 [audioExportFormat]）
   String _audioExportFormat = 'mp3';
 
@@ -288,6 +292,15 @@ class StorageService {
   bool get mediaFocusMode => _mediaFocusMode;
 
   bool get headsetToolsVisible => _headsetToolsVisible;
+
+  bool get readingNoticeEnabled => _readingNoticeEnabled;
+
+  Future<void> setReadingNoticeEnabled(bool value) async {
+    if (_readingNoticeEnabled == value) return;
+    _readingNoticeEnabled = value;
+    appearance.value++;
+    await (await _sp).setBool(_kReadingNotice, value);
+  }
 
   Future<void> setHeadsetToolsVisible(bool value) async {
     if (_headsetToolsVisible == value) return;
@@ -437,6 +450,7 @@ class StorageService {
     _audioAnchorEnabled = false;
     _mediaFocusMode = false;
     _headsetToolsVisible = false;
+    _readingNoticeEnabled = true;
     _audioExportFormat = 'mp3';
     _pdfSentenceAlignment = 0.35;
     _tutorialDone = false;
@@ -523,6 +537,7 @@ class StorageService {
     _audioAnchorEnabled = sp.getBool(_kAudioAnchor) ?? false;
     _mediaFocusMode = sp.getBool(_kMediaFocusMode) ?? false;
     _headsetToolsVisible = sp.getBool(_kHeadsetTools) ?? false;
+    _readingNoticeEnabled = sp.getBool(_kReadingNotice) ?? true;
     _audioExportFormat = sp.getString(_kAudioExportFormat) ?? 'mp3';
     _pdfSentenceAlignment = sp.getDouble(_kPdfSentenceAlignment) ?? 0.35;
     await loadReaderStyle();
