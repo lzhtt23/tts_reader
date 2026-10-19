@@ -215,6 +215,10 @@
             </intent-filter>
         </receiver>
 
+        <!-- 朗读控制通知的按钮（自定义通知，不走 MediaStyle / 媒体会话） -->
+        <receiver
+            android:name=".ReadingNoticeReceiver"
+            android:exported="true" />
         <!-- ==================== 复制即朗读（C2S） ==================== -->
 
         <!-- 取剪贴板的透明界面：Android 10+ 只有有焦点的应用才读得到剪贴板 -->

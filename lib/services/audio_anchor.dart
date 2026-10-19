@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:path_provider/path_provider.dart';
 
+import '../tts/tts_manager.dart';
 import 'crash_log.dart';
 
 /// 「音频锚点」：朗读时让**本应用自己**持有一个静音音频输出
@@ -37,7 +38,23 @@ class AudioAnchor {
 
   /// 开始持有音频输出（重复调用安全）
   Future<void> start() async {
-    if (_player != null || _starting) return;
+    // ★v1.22.29：已经建过 player 但被系统按了暂停（丢焦点时 just_audio 会自己停）
+    // → **重新播起来**，不要因为 `_player != null` 就直接返回。
+    //
+    // 真机（平板 2026-10-19）：被其它媒体打断后，耳机键要重启应用才恢复 ——
+    // 原因就是锚点被焦点丢失停掉后没人重开，MediaSession 不再处于 PLAYING，
+    // 系统就不再把我们当「媒体按钮会话」。
+    final AudioPlayer? existing = _player;
+    if (existing != null) {
+      if (!existing.playing) {
+        try {
+          await existing.play();
+          CrashLog.mark('音频锚点[重开] 被系统暂停过，已恢复播放');
+        } catch (_) {}
+      }
+      return;
+    }
+    if (_starting) return;
     _starting = true;
     try {
       final String path = await _ensureSilenceFile();
@@ -51,6 +68,13 @@ class AudioAnchor {
       // 不 await play()：用户没开声音，播完这行就算"占用中"
       unawaited(player.play());
       _player = player;
+      // 被系统按停（丢焦点 / 蓝牙切换）时自己爬起来，保证 MediaSession 一直在播
+      player.playerStateStream.listen((PlayerState st) {
+        if (st.playing) return;
+        if (!identical(_player, player)) return;
+        if (!TtsManager.instance.playing) return;
+        unawaited(player.play().catchError((Object _) {}));
+      });
       CrashLog.mark('音频锚点[开] 已持有静音音频输出');
     } catch (e) {
       CrashLog.mark('音频锚点[失败] $e');

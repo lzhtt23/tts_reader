@@ -110,6 +110,10 @@ class MediaInterruptionController {
   void notifyUserResumed() {
     _userPaused = false;
     _pausedForInterruption = false;
+    // v1.22.37: interruption ended -> take audio focus back,
+    // otherwise the session stays PAUSED and Android removes us from
+    // media-button routing (no headset / no notification control until restart).
+    unawaited(requestFocus());
   }
 
   /// 开关变化后重新配置音频属性

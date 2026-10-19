@@ -92,9 +92,11 @@ void main() {
         onTimeout: () => fail('双击朗读没有结束（疑似卡住）'),
       );
 
-      expect(engine.spoken.length, chunks.length);
-      expect(engine.spoken.first, chunks.first);
-      expect(engine.spoken.last, chunks.last);
+      // ★v1.22.25：单片上限 300 → 80 字，"一行 = 一次 speak"不再成立
+      // （外层的片会被内层再切）。判据改成**内容**：全念完、顺序不乱、拼回原文。
+      expect(engine.spoken.length, greaterThanOrEqualTo(chunks.length));
+      expect(engine.spoken.join(), paragraph,
+          reason: '切片只切不改：拼回去必须与原文一致');
       expect(tts.error, isNull);
       expect(tts.speaking, isFalse);
       expect(tts.plainIndex, chunks.length - 1, reason: '读完后停在最后一片');

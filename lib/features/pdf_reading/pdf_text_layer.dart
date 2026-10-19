@@ -145,11 +145,23 @@ class PdfTextSentence {
 
     final rects = <Rect>[];
     for (final row in rows) {
-      var left = row.first.rect.left;
-      var right = row.first.rect.right;
-      var top = row.first.rect.top;
-      var bottom = row.first.rect.bottom;
-      for (final c in row.skip(1)) {
+      // ★v1.22.27：算这一行的左右边界时**只看有墨的字符**。
+      //
+      // 真机（平板 TB335FC，2026-10-19）：高亮框会明显超出文字右侧、甚至铺到
+      // 页面边上。原因是行里混进了**空白字符 / 占位盒**（空格、换行、引擎给的
+      // 零面积或超宽假盒），而这里取的是 min/max —— 一个坏盒就把整行拉宽。
+      // 空白本来就没有墨，不该参与边界；超宽盒（宽于字高中位数 3 倍）同理。
+      final List<PdfTextChar> ink = row
+          .where((c) =>
+              c.char.trim().isNotEmpty &&
+              (medianH <= 0 || c.rect.width <= medianH * 3))
+          .toList();
+      final List<PdfTextChar> basis = ink.isEmpty ? row : ink;
+      var left = basis.first.rect.left;
+      var right = basis.first.rect.right;
+      var top = basis.first.rect.top;
+      var bottom = basis.first.rect.bottom;
+      for (final c in basis.skip(1)) {
         if (c.rect.left < left) left = c.rect.left;
         if (c.rect.right > right) right = c.rect.right;
         if (c.rect.top < top) top = c.rect.top;

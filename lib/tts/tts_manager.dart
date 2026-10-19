@@ -1795,7 +1795,18 @@ class TtsManager extends ChangeNotifier implements AudioSessionSource {
     }
   }
   /// 系统 TTS 单条输入有长度上限，超长单元（整页 / 整章）需要切片
-  static const int _maxUtterance = 300;
+  /// 单次交给引擎的文本上限（字）
+  ///
+  /// ★v1.22.25：300 → **80**。
+  ///
+  /// 真机（手机 PKG110，2026-10-19 列宁文集）：一句 195 字，MultiTTS 的 **hd**
+  /// 音色念得比普通音色慢，整句预算按"8s + 0.4s/字"算到 86 秒**仍然读完**，
+  /// 于是被误判成「引擎无响应」并弹「朗读超时」。
+  ///
+  /// 切到 80 字后每块预算约 40 秒、实际念 20~25 秒，长句不再撞上限；
+  /// 顺带让暂停 / 切句更快响应（不用等整句念完）。切分仍走
+  /// [DocumentService.readChunks]，**优先在标点处断**，不会把词切断。
+  static const int _maxUtterance = 80;
 
   // ---------------- 插件调用兜底超时 ----------------
   //

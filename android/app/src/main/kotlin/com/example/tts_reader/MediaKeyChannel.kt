@@ -75,6 +75,24 @@ object MediaKeyChannel {
                     appContext?.let { claimMediaButtons(it) }
                     result.success(true)
                 }
+                // 朗读控制通知（自定义样式，不依赖媒体会话）
+                "showNotice" -> {
+                    val ctx = appContext
+                    val args = call.arguments as? Map<*, *>
+                    if (ctx != null && args != null) {
+                        ReadingNotice.show(
+                            ctx,
+                            title = args["title"] as? String ?: "",
+                            detail = args["detail"] as? String ?: "",
+                            playing = args["playing"] == true,
+                        )
+                    }
+                    result.success(true)
+                }
+                "hideNotice" -> {
+                    appContext?.let { ReadingNotice.hide(it) }
+                    result.success(true)
+                }
                 // 音量键长按切句的开关（Dart 侧跟设置同步）
                 "setVolumeKeySkip" -> {
                     volumeKeySkip = call.arguments == true
@@ -94,6 +112,11 @@ object MediaKeyChannel {
      * ② 到了但我们没认出来 / 没接管
      * 打一行日志就能分辨。
      */
+    /** 通知按钮的动作（ReadingNoticeReceiver 转进来）→ Dart，语义与按键完全一致 */
+    fun dispatchAction(action: String) {
+        channel?.invokeMethod("mediaKey", action)
+    }
+
     fun logKey(
         keyCode: Int,
         action: Int,

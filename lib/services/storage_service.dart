@@ -258,7 +258,7 @@ class StorageService {
   /// ★v1.22.22：**默认开** —— 真机 + adb 验证这是让耳机键生效的那一环：
   /// 它让 MediaSession 真正处于 PLAYING，系统才把本应用当作
   /// 「Media button session」(dumpsys media_session 可见)。关掉按键就不灵。
-  bool _audioAnchorEnabled = true;
+  bool _audioAnchorEnabled = false;
 
   /// 是否以**媒体**身份占音频焦点（修耳机键，见 MediaInterruptionController）
   bool _mediaFocusMode = false;
@@ -434,7 +434,7 @@ class StorageService {
     _backgroundImageOpacity = 0.35;
     _allowMediaInterrupt = true;
     _volumeKeySkip = false;
-    _audioAnchorEnabled = true;
+    _audioAnchorEnabled = false;
     _mediaFocusMode = false;
     _headsetToolsVisible = false;
     _audioExportFormat = 'mp3';
@@ -520,7 +520,7 @@ class StorageService {
     // 音频 / 耳机控制
     _allowMediaInterrupt = sp.getBool(_kAllowMediaInterrupt) ?? true;
     _volumeKeySkip = sp.getBool(_kVolumeKeySkip) ?? false;
-    _audioAnchorEnabled = sp.getBool(_kAudioAnchor) ?? true;
+    _audioAnchorEnabled = sp.getBool(_kAudioAnchor) ?? false;
     _mediaFocusMode = sp.getBool(_kMediaFocusMode) ?? false;
     _headsetToolsVisible = sp.getBool(_kHeadsetTools) ?? false;
     _audioExportFormat = sp.getString(_kAudioExportFormat) ?? 'mp3';

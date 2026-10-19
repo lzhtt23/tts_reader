@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:flutter/services.dart';
 
+import '../features/pdf_reading/pdf_read_session.dart';
 import '../tts/tts_audio_handler.dart';
 import '../tts/tts_manager.dart';
 import 'audio_anchor.dart';
@@ -112,10 +113,13 @@ class MediaKeyChannel {
     final TtsManager tts = TtsManager.instance;
     final bool sessionPlaying =
         audioHandler?.playbackState.value.playing ?? false;
+    // ★v1.22.32：PDF 会话"已打开但还没播"也要算进 busy ——
+    // 用户要求"刚进播放页就能用耳机启停"，那就得从这一刻起占住 A2DP。
     final bool busy = tts.playing ||
         tts.hasSession ||
         tts.isBorrowedForOther ||
-        sessionPlaying;
+        sessionPlaying ||
+        PdfReadSession.instance.isActive;
     final DateTime now = DateTime.now();
     if (busy) _lastBusyAt = now;
     final bool hold = _lastBusyAt != null &&
@@ -180,6 +184,9 @@ class MediaKeyChannel {
   /// 真正执行动作
   static void _act(String action) {
     final TtsAudioHandler? handler = audioHandler;
+    // ★v1.22.36 端到端取证：一次按钮点击在这条链路上到底走到哪一步。
+    // 平板实测「耳机键/通知按钮都无效、重启应用才好」，怀疑 handler 被系统抢占后
+    // 不再响应 —— 先证明它到底有没有被调用、调用时来源是什么状态。
     if (handler != null) {
       switch (action) {
         case 'play_pause':

@@ -4,6 +4,7 @@ import 'package:audio_service/audio_service.dart';
 import 'package:audio_session/audio_session.dart';
 
 import '../services/crash_log.dart';
+import '../services/reading_notice.dart';
 import '../services/media_key_state.dart';
 import '../features/pdf_reading/pdf_read_session.dart';
 import 'audio_session_source.dart';
@@ -214,6 +215,8 @@ class TtsAudioHandler extends BaseAudioHandler {
       // 会话结束（stop / clear）→ 卡片消失**。
       // v1.21.6 / §4.104 的「卡片保留 + 未在播放」中间态已撤销。
       _diag('pushState→idle（卡片消失）');
+      // 没会话了 → 自定义朗读通知也收掉
+      unawaited(ReadingNotice.hide());
       playbackState.add(PlaybackState(
         controls: const <MediaControl>[],
         systemActions: <MediaAction>{},
@@ -289,6 +292,10 @@ class TtsAudioHandler extends BaseAudioHandler {
             : const <MediaAction>{},
         androidCompactActionIndices: const <int>[0, 1, 3],
         processingState: AudioProcessingState.ready,
+        // ★v1.22.30（用户选的方案 C）：只有**被其它媒体打断**造成的暂停，
+        // 才继续以 PLAYING 上报 —— 这样系统仍把我们当「媒体按钮会话」，
+        // 耳机键在打断后立刻可用（否则实测 `Media button session is null`）。
+        // 用户**自己按暂停**时照旧上报 PAUSED，通知栏状态保持准确。
         playing: playing,
         updatePosition: Duration(milliseconds: index * _unitMillis),
         speed: source.rate,
@@ -297,6 +304,15 @@ class TtsAudioHandler extends BaseAudioHandler {
     );
     // 记下这次推出去的播放态：`syncAfterUserCommand()` 靠它判断"变了没有"
     _lastPushedPlayState = (playing, source.paused);
+    // ★v1.22.34：同步刷新**自定义**朗读通知（不依赖媒体会话）。
+    //
+    // 参考 T2S 的做法：通知按钮是 PendingIntent 直投广播，绕开媒体会话，
+    // 因此"被打断后失效""刚进页面不能启停"这些问题在这里都不会出现。
+    unawaited(ReadingNotice.show(
+      title: source.documentTitle,
+      detail: '第 ${index + 1}/$total 句',
+      playing: playing,
+    ));
   }
 
   /// 当前来源自己推状态时用（PDF 会话没有挂在 TtsManager 的 listener 上）
