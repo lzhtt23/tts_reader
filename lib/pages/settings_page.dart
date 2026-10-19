@@ -22,6 +22,7 @@ import '../tts/tts_engine.dart';
 import '../tts/tts_manager.dart';
 import '../widgets/adaptive.dart';
 import '../widgets/speech_diag_export_dialog.dart';
+import '../services/media_key_diagnostics.dart';
 import 'book_sources_page.dart';
 import 'legado_search_page.dart';
 import 'legado_sources_page.dart';
@@ -58,6 +59,10 @@ class SettingsPage extends StatefulWidget {
 
   /// 「允许其它媒体打断朗读」开关
   static const Key mediaInterruptKey = ValueKey<String>('settings-media-interrupt');
+
+  /// 「以媒体身份占音频焦点」开关（修耳机键）
+  static const Key mediaFocusModeKey =
+      ValueKey<String>('settings-media-focus-mode');
 
   @override
   State<SettingsPage> createState() => _SettingsPageState();
@@ -579,6 +584,145 @@ class _SettingsPageState extends State<SettingsPage> {
             ),
             trailing: const Icon(Icons.chevron_right),
             onTap: () => _configureCloud(tts),
+          ),
+          const Divider(height: 1),
+          // 物理键替代方案：有的平板根本不把耳机/蓝牙媒体键交给第三方应用
+          // （真机 2026-10-19：诊断页连一条按键记录都没有）。音量键一定送得到。
+          SwitchListTile(
+            key: const ValueKey<String>('settings-volume-key-skip'),
+            secondary: const Icon(Icons.volume_up_outlined),
+            value: StorageService.instance.volumeKeySkip,
+            title: const Text('音量键长按切句'),
+            subtitle: const Text(
+              '耳机键不生效的设备可以打开：朗读时长按音量+ 下一句、长按音量− 上一句。'
+              '短按照常调音量。',
+            ),
+            onChanged: (bool value) async {
+              await StorageService.instance.setVolumeKeySkip(value);
+              if (mounted) setState(() {});
+            },
+          ),
+          const Divider(height: 1),
+          // 修耳机键最靠谱的一条：以「媒体」身份占音频焦点
+          SwitchListTile(
+            key: SettingsPage.mediaFocusModeKey,
+            secondary: const Icon(Icons.hearing),
+            value: StorageService.instance.mediaFocusMode,
+            title: const Text('朗读时以媒体身份占用音频焦点（修耳机键）'),
+            subtitle: const Text(
+              '有的系统按「谁持有媒体焦点」来分配耳机键。打开后朗读期间本应用就是'
+              '媒体焦点持有者，耳机键才有机会派过来。'
+              '代价：朗读时其它音乐/视频会被暂停。',
+            ),
+            onChanged: (bool value) async {
+              await StorageService.instance.setMediaFocusMode(value);
+              await MediaInterruptionController.instance.applySettings();
+              if (mounted) setState(() {});
+            },
+          ),
+          const Divider(height: 1),
+          // 试验：让本进程持有静音音频输出（修 ColorOS 系的媒体键路由）
+          SwitchListTile(
+            key: const ValueKey<String>('settings-audio-anchor'),
+            secondary: const Icon(Icons.graphic_eq),
+            value: StorageService.instance.audioAnchorEnabled,
+            title: const Text('朗读时保持媒体音频输出（修耳机键）'),
+            subtitle: const Text(
+              '打开后朗读期间本应用会占一条听不到的静音音频轨，让系统把本应用认作'
+              '「媒体播放应用」——这样蓝牙耳机键才会派过来。'
+              '经真机 + adb 验证：这是耳机键生效的关键一项，默认开启。'
+              '若你不需要耳机键、也不想占用音频，可以关掉。',
+            ),
+            onChanged: (bool value) async {
+              await StorageService.instance.setAudioAnchorEnabled(value);
+              if (mounted) setState(() {});
+            },
+          ),
+          const Divider(height: 1),
+          // 媒体键诊断：平板「耳机键不生效」时，用它一眼看出键有没有到
+          ListTile(
+            key: const ValueKey<String>('settings-media-key-diag'),
+            leading: const Icon(Icons.headphones_outlined),
+            title: const Text('媒体键诊断'),
+            subtitle: const Text('看耳机/平板按键有没有到应用'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: _showMediaKeyDiagnostics,
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 媒体键诊断页
+  ///
+  /// 只读一个环形缓冲，说明写在页面上——用户不需要懂日志：
+  /// * 按了键**有记录** → 键到了，是识别/动作的问题
+  /// * 按了键**一条都没有** → 系统把键给了别人（MediaSession 那条路没接住）
+  Future<void> _showMediaKeyDiagnostics() async {
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('媒体键诊断'),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              const Text(
+                '现在按一下耳机键，再看下面的记录：\n'
+                '· 出现「原生 按键 …」→ 键到了应用\n'
+                '· 出现「MediaSession play/pause」→ 走通知栏那条路\n'
+                '· 什么都没有 → 系统把键给了别的应用',
+                style: TextStyle(fontSize: 12),
+              ),
+              const SizedBox(height: 10),
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxHeight: 260),
+                child: ValueListenableBuilder<List<String>>(
+                  valueListenable: MediaKeyDiagnostics.entries,
+                  builder: (BuildContext context, List<String> items, _) {
+                    if (items.isEmpty) {
+                      return const Padding(
+                        padding: EdgeInsets.symmetric(vertical: 24),
+                        child: Text('（还没有记录）', style: TextStyle(fontSize: 12)),
+                      );
+                    }
+                    return SingleChildScrollView(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: <Widget>[
+                          for (final String line in items)
+                            Padding(
+                              padding: const EdgeInsets.only(bottom: 4),
+                              child: Text(
+                                line,
+                                style: const TextStyle(
+                                  fontSize: 11,
+                                  fontFamily: 'monospace',
+                                ),
+                              ),
+                            ),
+                        ],
+                      ),
+                    );
+                  },
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () {
+              MediaKeyDiagnostics.clear();
+              Navigator.of(dialogContext).pop();
+            },
+            child: const Text('清空'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('关闭'),
           ),
         ],
       ),

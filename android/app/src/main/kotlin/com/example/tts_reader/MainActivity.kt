@@ -5,6 +5,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.view.KeyEvent
 import com.ryanheise.audioservice.AudioServiceActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -48,6 +49,9 @@ class MainActivity : AudioServiceActivity() {
         LameChannel.attach(flutterEngine.dartExecutor.binaryMessenger)
         // 启动图标样式切换（tts_reader/icon：切 activity-alias，无需权限）
         IconChannel.attach(this, flutterEngine.dartExecutor.binaryMessenger)
+        // 耳机 / 平板媒体键（tts_reader/media_keys）：
+        // 平板有些 ROM 不走 MediaSession，直接把按键派给前台 Activity
+        MediaKeyChannel.attach(flutterEngine.dartExecutor.binaryMessenger, applicationContext)
         // 引擎此刻才可用：把本次启动 intent 的文本补推一次
         deliverPending()
     }
@@ -55,6 +59,21 @@ class MainActivity : AudioServiceActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         captureIntent(intent)
+    }
+
+    /**
+     * 媒体键兜底：平板 / 部分 ROM 会把耳机键当普通按键派给前台 Activity
+     *
+     * 先给 [MediaKeyChannel]，认出来就消费掉（避免同一按键又被 MediaSession 处理一次）。
+     * 认不出（普通键）继续走系统默认。
+     */
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        // 音量键长按 → 切句（物理键替代方案，需在设置里打开）
+        if (MediaKeyChannel.handleVolumeKey(event)) return true
+        if (MediaKeyChannel.handleKeyEvent(event.keyCode, event.action)) {
+            return true
+        }
+        return super.dispatchKeyEvent(event)
     }
 
     override fun onNewIntent(intent: Intent) {

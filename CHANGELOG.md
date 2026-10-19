@@ -1,5 +1,197 @@
 # 更新日志
 
+## v1.22.22（2026-10-19）
+
+**修好：蓝牙耳机键在平板上不生效**
+
+### 定位过程（adb 实测）
+* `dumpsys audio` 的焦点历史显示：占着**媒体焦点**的一直是别的应用（twitter），
+  我们按 `speech()` 申请的是**语音**焦点
+* `dumpsys media_session` 里没有 `Media button session` → 系统没有"该把按键发给谁"
+  的答案，于是按键被丢弃
+
+### 修法
+`AudioAnchor`（v1.22.20 引入）：朗读期间由**本应用**循环播放一段 8KB 静音 WAV，
+让 MediaSession 真正处于 `PLAYING`。装上后 adb 立刻能看到：
+
+```
+Media button session is com.example.tts_reader/media-session/114
+```
+
+**现在这一项默认开启**（设置里可关）。它不申请音频焦点之外的权限，
+音量 0、只在朗读时运行。
+
+* 设置项更名为「朗读时保持媒体音频输出（修耳机键）」
+* 保留「以媒体身份占音频焦点」开关（更激进的方案，默认关）
+
+## v1.22.21（2026-10-19）
+
+**实验：朗读时以媒体身份占用音频焦点**
+
+adb 证据：`dumpsys audio` 里 `requestAudioFocus … callingPack=com.twitter.android
+AA=USAGE_MEDIA/CONTENT_TYPE_MOVIE` —— 媒体焦点被别的应用占着，我们用的是 `speech()`
+（语音焦点）。这类 ROM 的耳机键发给「媒体焦点持有者」，所以我们三条通道全空。
+
+新增开关「朗读时以媒体身份占用音频焦点（修耳机键）」：`usage: media` + `gain`，
+代价是朗读期间其它音乐/视频会被暂停，因此默认关。
+
+## v1.22.20（2026-10-19）
+
+**耳机键实验 2：「音频锚点」——让系统认为出声的是我们**
+
+平板是 **ZUX OS 1.5.10**（联想/ZUK）。这类系统按「谁在出声」分配耳机键；
+而我们的声音是**系统 TTS 引擎那个进程**放的，所以按键被绕过。
+
+新增 `AudioAnchor`：朗读期间由**本进程**循环播放一段静音 WAV（8kHz 单声道，
+约 8KB），让系统把我们当成正在播放的媒体应用。设置里独立开关：
+
+**设置 → 让本应用持有音频输出（修耳机键）**
+
+关键约束（避免把朗读弄坏）：
+* `handleAudioSessionActivation: false` —— **不申请音频焦点**，
+  否则会和 TTS 引擎抢焦点，把朗读压低/打断
+* 音量 0、1 秒静音循环，听不到、耗电极小
+* 只在「正在朗读」时开，停止立刻释放
+
+* `test/audio_anchor_test.dart` + 1 条（校验生成的 WAV 是合法结构）
+
+## v1.22.19（2026-10-19）
+
+**新增：音量键长按切句（耳机键不生效的设备可用）**
+
+平板诊断页证实：耳机键（OnePlus Buds Ace 3 / 蓝牙）**一条记录都没到应用**，
+但系统音量面板里的暂停键能用（说明我们的媒体会话本身没问题）——
+按键根本没发到我们这里，应用层无解。
+
+所以给一个**物理键替代方案**（默认关，在设置里打开）：
+
+* 朗读时 **长按音量+ → 下一句**
+* 朗读时 **长按音量− → 上一句**
+* **短按照常调音量**（只认长按，不影响平时使用）
+
+音量键一定会送到前台应用，不依赖蓝牙 AVRCP / 媒体会话。
+
+* `storage_service`：新增 `volumeKeySkip` 设置项
+* 原生 `MediaKeyChannel.handleVolumeKey()`：只在 `repeatCount > 0` 时拦截
+
+## v1.22.18（2026-10-19）
+
+**媒体键实验：主动认领 + 广播兜底**
+
+平板复现日志里出现了一条 `媒体控制[pause]` —— 说明按键**有时能到我们**，
+只是不稳定。所以按之前说好的方案 1 加两样东西（都是实验性，失败无副作用）：
+
+1. **主动认领媒体按钮**：开始朗读时调
+   `AudioManager.registerMediaButtonEventReceiver(...)`（API 21 之前的老做法，
+   新系统一般忽略，但**有些平板固件仍然按这条路派发**）
+2. **广播兜底**：新增 `TtsMediaButtonReceiver`，监听 `ACTION_MEDIA_BUTTON`
+   （优先级拉满）。Android 在「没有会话愿意处理」时会把按键广播出来，
+   多挂一个接收器就多一次接住的机会；接住后与原生 `dispatchKeyEvent`
+   走同一套动作翻译
+
+诊断页会显示 `已注册媒体按钮接收器` 或 `广播按键 key=…`，据此判断这条路通不通。
+
+## v1.22.17（2026-10-19）
+
+**加「媒体键诊断」页（设置里）**
+
+平板耳机键查了几轮，日志往返太慢，而且关键信息常常没截到。
+现在把判断依据做进应用里：**设置 → 媒体键诊断**。
+
+打开后按耳机键，页面上会实时列出：
+
+| 记录 | 含义 |
+| --- | --- |
+| `原生 按键 key=… active=…` | 键到了应用（原生 `dispatchKeyEvent`） |
+| `MediaSession play/pause/next/…` | 键走的是通知栏那条媒体会话 |
+| `收到 xxx` | 我们的兜底接下了并执行 |
+| （什么都没有） | 系统把键给了别的应用，我们这边根本没收到 |
+
+有了这一屏，就不必再靠猜——用户看一眼就知道卡在哪一层。
+
+* 新增 `MediaKeyDiagnostics`（30 条环形缓冲）+ `TtsAudioHandler` 各处记账
+
+## v1.22.16（2026-10-19）
+
+**修：点文档卡片回到 PDF 页，正在朗读被打断**
+
+### 原因
+`PdfReadSession.open()` 的「同一本重进」分支里有：
+
+```dart
+if (TtsManager.instance.playing) {
+  TtsManager.instance.terminateForDocumentSwitch(nextDocumentId: documentId);
+}
+```
+
+PDF 是**借 TtsManager 的声音**读的，所以朗读时 `playing == true` ——
+于是"重进自己的页面"把自己终止了。
+
+### 修法
+判据换成 `shouldTerminateOnReopen()`：
+* 没在播 → 不终止
+* 正在**借声给我**（PDF 就是这种）→ 不终止
+* 在播的**就是这本** → 不终止
+* 在播**别的书** → 才终止（换歌语义保留）
+
+* `test/pdf_reopen_no_interrupt_test.dart` + 4 条
+
+## v1.22.15（2026-10-19）
+
+**媒体键接管加 60 秒滞回（不再逐句抖动）**
+
+真机日志里 `媒体键[接管=true/false]` 跟着 `借声[进入]/[退出]` **每几秒翻一次**：
+PDF 借声是一句一次开关的，逐句判定会让"接管"抖个不停 —— 日志刷屏，
+而且按下的那一下可能正好落在 `false` 窗口里，兜底就不生效。
+
+现在加 60 秒滞回：只要朗读过，停手 60 秒内继续算"在朗读"。
+这样句间停顿、短暂缓冲都不会把接管关掉。
+
+## v1.22.14（2026-10-19）
+
+**平板耳机键：修「接管判定」+ 加按键诊断**
+
+### 1. 判定修对了（真机日志看出来的）
+真机日志里 `媒体键[接管=true/false]` 跟着 `借声[进入]/[退出]` 每几秒翻一次：
+PDF 借声期间 `TtsManager.hasSession` 恒为 **false**，所以我原来那句
+`playing || hasSession` 在**真正朗读的时候反而判成"没在朗读"**，兜底等于没开。
+
+现在改成任一成立就算在朗读：
+`playing` / `hasSession` / `isBorrowedForOther` / `audioHandler.playbackState.playing`，
+并订阅 `playbackState` 变化（PDF 会话也往那里推）。
+
+### 2. 加诊断：分清「按键没到」还是「到了没接」
+原生侧对**所有媒体类按键**都记一行（哪怕没接管）：
+`媒体键[原生] 按键 key=85 action=0 active=true 已转发=…`
+这样一次按键就能定位：
+* 有一条 `按键 …` → 键到了我们这里，问题在识别/动作
+* 一条都没有 → 系统把键路由给了别人（MediaSession 那条路没接住）
+
+## v1.22.13（2026-10-19）
+
+**修：平板耳机键不生效（手机行为一个字节都不动）**
+
+### 原因
+媒体键正常走 `audio_service` 的 MediaSession。平板 / 部分 ROM 会把耳机键
+**当普通按键派给前台 Activity**，根本不进 MediaSession → 按了没反应。
+
+### 修法：只在「没人处理」时补一手
+1. 原生 `dispatchKeyEvent` 把媒体键**转发**给 Dart，然后**原样放行**给系统
+   —— **从不消费按键**（这一条是"不影响手机"的关键）
+2. `TtsAudioHandler` 的 `play/pause/stop/skipToNext/skipToPrevious`
+   入口记一笔时间（`MediaKeyState.noteSessionAction()`）
+3. Dart 收到转发后**等 150ms**：
+   * 这期间 MediaSession 已经动过（手机正常情况）→ **自己放弃**
+   * 没人动（平板那种 ROM）→ 才执行，且走的是**同一个 handler 方法**
+     （`play()/pause()/skipToNext()`…），语义与 MediaSession 完全一致
+4. 另外只在**正在朗读**时才转发（原生侧由 Dart 通过 `setActive` 告知），
+   空闲时连转发都没有
+
+结果：手机上按键仍由 MediaSession 处理，我们 150ms 后发现有人做了就不动；
+平板上没人处理，兜底生效。
+
+* `test/media_key_channel_test.dart` + 4 条
+
 ## v1.22.12（2026-10-19）
 
 **修：下载下来是 `.bin`，打不开**

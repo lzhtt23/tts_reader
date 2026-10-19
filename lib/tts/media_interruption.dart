@@ -148,6 +148,29 @@ class MediaInterruptionController {
   /// 与 `AUDIOFOCUS_LOSS` / `LOSS_TRANSIENT`（视频 / 来电），属于平台通道改动，
   /// **本轮不做**。所以这里回到 `true`：**宁可被提示音打断，也不能不让位给视频**。
   AudioSessionConfiguration _configuration() {
+    // ★v1.22.21 实验：以**媒体**身份占焦点
+    //
+    // 真机（联想 TB335FC / ZUX OS 1.5.10，2026-10-19）用 adb 查到的证据：
+    // `dumpsys audio` 的焦点历史里，占着 `USAGE_MEDIA / CONTENT_TYPE_MOVIE`
+    // 的是别的 App（twitter），我们按 `speech()` 申请的是**语音**焦点。
+    // 而这类 ROM 的耳机（蓝牙 AVRCP）按键是发给「持有媒体焦点的应用」的
+    // —— 于是按键永远轮不到我们：Activity、MediaSession、广播三条路都是空的。
+    //
+    // 换成 `usage: media` + `gain`（而不是 speech/duck）后，本应用就是媒体
+    // 焦点持有者，按键才可能派过来。代价：朗读期间别的媒体会被我们打断
+    // （对听书来说其实合理），所以做成**开关**，默认关。
+    if (StorageService.instance.mediaFocusMode) {
+      return const AudioSessionConfiguration(
+        avAudioSessionCategory: AVAudioSessionCategory.playback,
+        avAudioSessionMode: AVAudioSessionMode.spokenAudio,
+        androidAudioAttributes: AndroidAudioAttributes(
+          contentType: AndroidAudioContentType.speech,
+          usage: AndroidAudioUsage.media,
+        ),
+        androidAudioFocusGainType: AndroidAudioFocusGainType.gain,
+        androidWillPauseWhenDucked: true,
+      );
+    }
     if (StorageService.instance.allowMediaInterrupt) {
       return const AudioSessionConfiguration.speech();
     }

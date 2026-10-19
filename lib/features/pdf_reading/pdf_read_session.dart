@@ -13,6 +13,28 @@ import '../../tts/tts_manager.dart';
 import 'pdf_page_layer.dart';
 import 'pdf_text_layer.dart';
 
+/// 「同一本 PDF 重进时，要不要终止当前朗读」
+///
+/// 单独抽出来是为了能离线单测 —— 这是真机 bug 的唯一边界条件
+/// （用户 2026-10-19：PDF 正在朗读，点文档卡片回到 PDF 页，朗读被打断）。
+///
+/// 判据：
+/// * 没在播 → 不用终止
+/// * 正在**借声给我**（PDF 就是这么读的）→ 更不能终止，那是自己的声音
+/// * 在播的**就是这本** → 不用终止
+/// * 其余（在播别的书）→ 终止（换歌语义）
+bool shouldTerminateOnReopen({
+  required bool playing,
+  required bool borrowed,
+  required String? activeDocumentId,
+  required String documentId,
+}) {
+  if (!playing) return false;
+  if (borrowed) return false;
+  if (activeDocumentId == documentId) return false;
+  return true;
+}
+
 /// PDF 朗读的 UI 监听者（阅读页实现它）。
 ///
 /// 会话只通过这几个回调通知界面，**不持有任何 Widget**。
@@ -633,7 +655,20 @@ class PdfReadSession extends ChangeNotifier implements AudioSessionSource {
       //   · `terminateForDocumentSwitch` 会停上一本、把它位置写回盘（换歌语义）；
       //   · 来源（通知栏派发给谁）仍由前台派发决定，这里**不主动抢**。
       // 之前把两者一起删掉，才导致"切过去了但还在念上一本"。
-      if (TtsManager.instance.playing) {
+      // ⚠️ v1.22.16：**只终止"别人的"朗读**
+      //
+      // 真机（用户 2026-10-19）：PDF 正在文档库里朗读，点文档卡片回到 PDF 页，
+      // 朗读被打断。原因就是下面这句 `if (TtsManager.instance.playing)`：
+      // PDF 是**借 TtsManager 的声音**读的，此时 `playing == true`，
+      // 于是重进自己的页面反而把自己终止了。
+      //
+      // 判据换成：正在播 **且** 不是"借声给我" **且** 播的不是这本 —— 才终止。
+      if (shouldTerminateOnReopen(
+        playing: TtsManager.instance.playing,
+        borrowed: TtsManager.instance.isBorrowedForOther,
+        activeDocumentId: TtsManager.instance.activeDocumentId,
+        documentId: documentId,
+      )) {
         TtsManager.instance.terminateForDocumentSwitch(
           nextDocumentId: documentId,
         );
