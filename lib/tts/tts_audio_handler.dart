@@ -2,14 +2,32 @@ import 'dart:async';
 
 import 'package:audio_service/audio_service.dart';
 import 'package:audio_session/audio_session.dart';
+import 'package:flutter/widgets.dart';
 
 import '../services/crash_log.dart';
-import '../services/reading_notice.dart';
-import '../services/media_key_state.dart';
 import '../features/pdf_reading/pdf_read_session.dart';
 import 'audio_session_source.dart';
 import 'media_interruption.dart';
 import 'tts_manager.dart';
+
+/// 平板等「暂停后耳机键失效」的设备上为 true
+///
+/// 让通知保持 ongoing，且暂停时也不退出前台服务 —— 这样系统才会一直把我们
+/// 当作媒体按键的接收方（`dumpsys media_session` 里 `Media button session`
+/// 不再变成 null）。手机实测旧值（false/false）正常，所以**按设备类型切换**，
+/// 不改手机的既有行为。
+bool get _keepAliveInBackground => _isTabletDevice();
+
+bool _isTabletDevice() {
+  try {
+    final view = WidgetsBinding.instance.platformDispatcher.views.first;
+    final double shortest =
+        view.physicalSize.shortestSide / view.devicePixelRatio;
+    return shortest >= 600;
+  } catch (_) {
+    return false;
+  }
+}
 
 /// 全局持有，避免被回收
 TtsAudioHandler? audioHandler;
@@ -146,7 +164,8 @@ class TtsAudioHandler extends BaseAudioHandler {
       await session.configure(const AudioSessionConfiguration.speech());
       final handler = await AudioService.init(
         builder: () => TtsAudioHandler(TtsManager.instance),
-        config: const AudioServiceConfig(
+        // not const: the two background-keepalive flags are resolved at runtime
+        config: AudioServiceConfig(
           androidNotificationChannelId: _notificationChannelId,
           androidNotificationChannelName: '朗读控制',
           androidNotificationChannelDescription: '显示朗读进度并控制播放',
@@ -156,7 +175,7 @@ class TtsAudioHandler extends BaseAudioHandler {
           // 语义没变差：前台服务活着时，系统本来就会把通知强制成 ongoing，
           // 所以「暂停时划不掉」这条依旧成立（= 用户选的 B）；
           // 而 active 的 FGS 正好保证熄屏/后台时媒体键还有人处理。
-          androidNotificationOngoing: false,
+          androidNotificationOngoing: _keepAliveInBackground,
           // v1.21.14 任务②（用户拍板选 B）：**暂停也不退出前台服务**。
           //
           // 原值 true 的代价（实测）：暂停即退出前台服务 → 熄屏 + 后台时，
@@ -165,7 +184,7 @@ class TtsAudioHandler extends BaseAudioHandler {
           //   亮屏：79 暂停 ✓ / 126 播放 ✓ / 85 ✓
           //   熄屏：79 暂停 ✓，126/85 **完全无反应**（连一次状态都没推）
           // 换成 false 后，熄屏 / 后台也能用耳机恢复播放。
-          androidStopForegroundOnPause: false,
+          androidStopForegroundOnPause: _keepAliveInBackground,
           androidNotificationIcon: 'drawable/ic_stat_speech',
         ),
       );
@@ -216,7 +235,6 @@ class TtsAudioHandler extends BaseAudioHandler {
       // v1.21.6 / §4.104 的「卡片保留 + 未在播放」中间态已撤销。
       _diag('pushState→idle（卡片消失）');
       // 没会话了 → 自定义朗读通知也收掉
-      unawaited(ReadingNotice.hide());
       playbackState.add(PlaybackState(
         controls: const <MediaControl>[],
         systemActions: <MediaAction>{},
@@ -304,15 +322,6 @@ class TtsAudioHandler extends BaseAudioHandler {
     );
     // 记下这次推出去的播放态：`syncAfterUserCommand()` 靠它判断"变了没有"
     _lastPushedPlayState = (playing, source.paused);
-    // ★v1.22.34：同步刷新**自定义**朗读通知（不依赖媒体会话）。
-    //
-    // 参考 T2S 的做法：通知按钮是 PendingIntent 直投广播，绕开媒体会话，
-    // 因此"被打断后失效""刚进页面不能启停"这些问题在这里都不会出现。
-    unawaited(ReadingNotice.show(
-      title: source.documentTitle,
-      detail: '第 ${index + 1}/$total 句',
-      playing: playing,
-    ));
   }
 
   /// 当前来源自己推状态时用（PDF 会话没有挂在 TtsManager 的 listener 上）
@@ -381,7 +390,6 @@ class TtsAudioHandler extends BaseAudioHandler {
   /// `TtsManager._restart` 里本来就是 `unawaited(requestFocus())`，这里对齐。
   @override
   Future<void> play() async {
-    MediaKeyState.noteSessionAction('play');
     // ★v1.21.54 诊断：把「这一拍播放究竟派发给谁」一次打全。
     //
     // 用户报「书A暂停 → 打开书B → 恢复却读书A」，但纯 Dart 层已实测 A 完全脱离
@@ -488,7 +496,6 @@ class TtsAudioHandler extends BaseAudioHandler {
   /// 于是紧接着按播放能直接读对书（不必按两次）。
   @override
   Future<void> pause() async {
-    MediaKeyState.noteSessionAction('pause');
     _diag('pause');
     MediaInterruptionController.instance.notifyUserPaused();
     // ★按前台派发：与 [play] 的 423-432 完全对称。
@@ -514,7 +521,6 @@ class TtsAudioHandler extends BaseAudioHandler {
 
   @override
   Future<void> stop() async {
-    MediaKeyState.noteSessionAction('stop');
     _diag('stop');
     await _manager.stop();
     await MediaInterruptionController.instance.releaseFocus();
@@ -542,7 +548,6 @@ class TtsAudioHandler extends BaseAudioHandler {
   /// `skipToPrevious / play|pause / skipToNext`，语义不变。
   @override
   Future<void> skipToNext() async {
-    MediaKeyState.noteSessionAction('next');
     _diag('skipToNext');
     _source.skipSentenceForward();
   }
@@ -550,7 +555,6 @@ class TtsAudioHandler extends BaseAudioHandler {
   /// 耳机「上一首」：**上一句**（同上，删掉「按章」分支）
   @override
   Future<void> skipToPrevious() async {
-    MediaKeyState.noteSessionAction('previous');
     _diag('skipToPrevious');
     _source.skipSentenceBackward();
   }

@@ -1,5 +1,29 @@
 # 更新日志
 
+## v1.22.46（2026-10-20）
+
+**清理：移除全部耳机专门适配，回到标准媒体会话**
+
+### 背景
+平板（联想 TB335FC / ZUX OS）的蓝牙耳机媒体键始终无法送达应用。
+排查结论：**连最老版本 1.16.0 也复现**，不是版本回归，而是该固件的行为。
+参考同类应用 T2S（在虚拟机实测其 `EasyMediaSession`：`active=false`、
+`mediaButtonReceiver=null`）—— **它压根不做耳机键专门适配**，只用标准媒体会话
++ 通知栏控件。本版对齐这一做法。
+
+### 移除了什么
+* `dispatchKeyEvent` 媒体键拦截（MainActivity）
+* 自建 `TtsMediaButtonReceiver`（`MEDIA_BUTTON` 广播，最高优先级）
+* `MediaKeyChannel` / `MediaKeyState` / `MediaKeyDiagnostics`
+* 自定义朗读控制通知 `ReadingNotice` + 其接收器 + 设置开关
+* 设置页「耳机控制失效诊断和修复」整块（音量键长按切句 / 以媒体身份占音频焦点 /
+  保持媒体音频输出 / 媒体键诊断四项）
+* `AudioAnchor`（静音音频输出的「音频锚点」）
+
+### 保留
+`audio_service` 的标准 MediaSession 路径 + 通知栏媒体卡（旧版同样形态），
+手机端行为完全不变。
+
 ## v1.22.40（2026-10-20）
 
 **新增设置项：朗读控制通知开关**
@@ -8,7 +32,9 @@
 关掉后朗读时不再显示自定义控制通知，并立刻收起已显示的那条。
 副标题如实说明用途：上一句 / 播放暂停 / 下一句 / 停止，不依赖耳机与媒体会话。
 
-* storage_service：eadingNoticeEnabled（eading_notice_enabled，默认 true）
+* storage_service：
+eadingNoticeEnabled（
+eading_notice_enabled，默认 true）
 * ReadingNotice.show 前置判断；设置页切换时即时收起
 * 注意：media_interruption_test 的「设置页控件」用例曾因新开关插在
   「允许其它媒体打断朗读」**前面**而点击不到，已把新开关移到它下面（用例恢复绿）

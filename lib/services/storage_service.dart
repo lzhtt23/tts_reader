@@ -133,11 +133,6 @@ class StorageService {
   static const String _kBackgroundImage = 'theme_background_image';
   static const String _kBackgroundImageOpacity = 'theme_bg_opacity';
   static const String _kAllowMediaInterrupt = 'audio_allow_media_interrupt';
-  static const String _kVolumeKeySkip = 'audio_volume_key_skip';
-  static const String _kAudioAnchor = 'audio_anchor_enabled';
-  static const String _kMediaFocusMode = 'audio_media_focus_mode';
-  static const String _kHeadsetTools = 'settings_headset_tools_visible';
-  static const String _kReadingNotice = 'reading_notice_enabled';
 
   /// 导出朗读音频的格式（★v1.21.45 改动 5）：`mp3`（默认）或 `wav`
   ///
@@ -246,30 +241,6 @@ class StorageService {
   /// 对方结束 / 来电挂断后自动继续。默认开 —— 这是用户要的行为。
   bool _allowMediaInterrupt = true;
 
-  /// 音量键**长按**切句（默认关）
-  ///
-  /// 为什么要有：有的平板固件根本不把耳机/蓝牙媒体键交给第三方应用
-  /// （真机 2026-10-19：诊断页连一条按键记录都没有）。音量键则一定会送到
-  /// 前台应用，所以给一个物理键替代方案。**只认长按**，短按仍然调音量，
-  /// 不会影响用户平时用音量键。
-  bool _volumeKeySkip = false;
-
-  /// 是否让本进程持有静音音频输出（修耳机键的路由）
-  ///
-  /// ★v1.22.22：**默认开** —— 真机 + adb 验证这是让耳机键生效的那一环：
-  /// 它让 MediaSession 真正处于 PLAYING，系统才把本应用当作
-  /// 「Media button session」(dumpsys media_session 可见)。关掉按键就不灵。
-  bool _audioAnchorEnabled = false;
-
-  /// 是否以**媒体**身份占音频焦点（修耳机键，见 MediaInterruptionController）
-  bool _mediaFocusMode = false;
-
-  /// 设置页是否展开「耳机控制失效诊断和修复」下的四项（默认收起）
-  bool _headsetToolsVisible = false;
-
-  /// show the custom reading-control notification (v1.22.40)
-  bool _readingNoticeEnabled = true;
-
   /// 导出音频格式（存扩展名字符串；默认 mp3 —— 见 [audioExportFormat]）
   String _audioExportFormat = 'mp3';
 
@@ -284,44 +255,6 @@ class StorageService {
   double get backgroundImageOpacity => _backgroundImageOpacity;
 
   bool get allowMediaInterrupt => _allowMediaInterrupt;
-
-  bool get volumeKeySkip => _volumeKeySkip;
-
-  bool get audioAnchorEnabled => _audioAnchorEnabled;
-
-  bool get mediaFocusMode => _mediaFocusMode;
-
-  bool get headsetToolsVisible => _headsetToolsVisible;
-
-  bool get readingNoticeEnabled => _readingNoticeEnabled;
-
-  Future<void> setReadingNoticeEnabled(bool value) async {
-    if (_readingNoticeEnabled == value) return;
-    _readingNoticeEnabled = value;
-    appearance.value++;
-    await (await _sp).setBool(_kReadingNotice, value);
-  }
-
-  Future<void> setHeadsetToolsVisible(bool value) async {
-    if (_headsetToolsVisible == value) return;
-    _headsetToolsVisible = value;
-    appearance.value++;
-    await (await _sp).setBool(_kHeadsetTools, value);
-  }
-
-  Future<void> setMediaFocusMode(bool value) async {
-    if (_mediaFocusMode == value) return;
-    _mediaFocusMode = value;
-    appearance.value++;
-    await (await _sp).setBool(_kMediaFocusMode, value);
-  }
-
-  Future<void> setAudioAnchorEnabled(bool value) async {
-    if (_audioAnchorEnabled == value) return;
-    _audioAnchorEnabled = value;
-    appearance.value++;
-    await (await _sp).setBool(_kAudioAnchor, value);
-  }
 
   /// 导出朗读音频用的格式（★v1.21.45 改动 5）：默认 **MP3**
   ///
@@ -377,14 +310,6 @@ class StorageService {
     _allowMediaInterrupt = value;
     appearance.value++;
     await (await _sp).setBool(_kAllowMediaInterrupt, value);
-  }
-
-  /// 音量键长按切句（物理键替代方案，见 [_volumeKeySkip]）
-  Future<void> setVolumeKeySkip(bool value) async {
-    if (_volumeKeySkip == value) return;
-    _volumeKeySkip = value;
-    appearance.value++;
-    await (await _sp).setBool(_kVolumeKeySkip, value);
   }
 
   /// 切换配色来源（true = 手机动态取色）
@@ -446,11 +371,6 @@ class StorageService {
     _backgroundImage = '';
     _backgroundImageOpacity = 0.35;
     _allowMediaInterrupt = true;
-    _volumeKeySkip = false;
-    _audioAnchorEnabled = false;
-    _mediaFocusMode = false;
-    _headsetToolsVisible = false;
-    _readingNoticeEnabled = true;
     _audioExportFormat = 'mp3';
     _pdfSentenceAlignment = 0.35;
     _tutorialDone = false;
@@ -533,11 +453,6 @@ class StorageService {
     _backgroundImageOpacity = sp.getDouble(_kBackgroundImageOpacity) ?? 0.35;
     // 音频 / 耳机控制
     _allowMediaInterrupt = sp.getBool(_kAllowMediaInterrupt) ?? true;
-    _volumeKeySkip = sp.getBool(_kVolumeKeySkip) ?? false;
-    _audioAnchorEnabled = sp.getBool(_kAudioAnchor) ?? false;
-    _mediaFocusMode = sp.getBool(_kMediaFocusMode) ?? false;
-    _headsetToolsVisible = sp.getBool(_kHeadsetTools) ?? false;
-    _readingNoticeEnabled = sp.getBool(_kReadingNotice) ?? true;
     _audioExportFormat = sp.getString(_kAudioExportFormat) ?? 'mp3';
     _pdfSentenceAlignment = sp.getDouble(_kPdfSentenceAlignment) ?? 0.35;
     await loadReaderStyle();

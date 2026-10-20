@@ -17,7 +17,6 @@ import 'services/document_service.dart';
 import 'services/download_watcher.dart';
 import 'services/gbk_decoder.dart';
 import 'services/legado_source_store.dart';
-import 'services/media_key_channel.dart';
 import 'services/rss_importer.dart';
 import 'services/rss_store.dart';
 import 'services/source_importer.dart';
@@ -85,8 +84,6 @@ Future<void> _initDeferredServices() async {
   // 后台朗读 + 通知栏控制：注册前台服务与媒体通知
   await TtsAudioHandler.init();
   // 耳机 / 平板媒体键兜底：平板有些 ROM 不走 MediaSession，
-  // 原生侧会把按键事件转发过来（tts_reader/media_keys）
-  MediaKeyChannel.attach();
   // 音频属性 + 打断监听：**必须在这里单独做一次**，不能只靠 init() 里那句 ——
   // 桌面 / 测试环境里 audio_service 会初始化失败，那时也要按当前设置
   // （是否允许其它媒体打断）把音频会话配好，否则开关形同虚设。

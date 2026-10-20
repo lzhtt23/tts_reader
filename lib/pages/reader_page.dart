@@ -3430,7 +3430,10 @@ class _ReaderPageState extends State<ReaderPage> {
   /// 分页版面下「跳转」是两件事：**页级**交给 PageView，**页内**用该页自己的
   /// 滚动控制器。原来那套「估算滚动偏移 + 反复微调」在分页下没有意义
   /// （每一页的滚动范围都是独立的），也正好把「跳转时页面乱动」的老问题绕开了。
-  Future<void> _revealBlock(int blockIndex, {double alignment = 0.05}) async {
+  // v1.22.42: entry positioning used to align the paragraph top at 5% of the
+  // viewport, which put the reading sentence near the very top. 0.30 keeps it
+  // dead center (user: "too high", then "I want it centered").
+  Future<void> _revealBlock(int blockIndex, {double alignment = 0.50}) async {
     if (_blocks.isEmpty || _paging.isEmpty || !mounted) {
       _followLog(
         '定位放弃',
@@ -3580,7 +3583,7 @@ class _ReaderPageState extends State<ReaderPage> {
   /// 随后 `ensureVisible` 会精确对齐。
   void _scrollTowardBlock(
     int target, {
-    double alignment = 0.05,
+    double alignment = 0.50,
     bool instant = false,
   }) {
     final scroll = _pageScroll(_displayedPage);
@@ -4603,6 +4606,13 @@ class _ReaderPageState extends State<ReaderPage> {
       return;
     }
 
+    // v1.22.41: while the enter-positioning is still running, do NOT animate --
+    // two scroll drivers fighting left the sentence 500+px short (real-device log:
+    // "scroll finished ... interrupted (taken over)" twice).
+    if (_revealBusy) {
+      _followLog('skip', 'enter-reveal busy -> follow scroll suppressed');
+      return;
+    }
     _followLog(
       '滚动',
       '目标=${want.toStringAsFixed(1)} 起点=${scrollPosition.pixels.toStringAsFixed(1)} '
