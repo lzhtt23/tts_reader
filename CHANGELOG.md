@@ -1,5 +1,30 @@
 # 更新日志
 
+## v1.22.47（2026-10-20）
+
+**去掉全部耳机/媒体键特别适配，手机与平板走同一套代码**
+
+### 排查结论（有 adb 证据，已停）
+平板（联想 TB335FC / ZUX OS）的耳机键问题出自系统层：
+
+```
+Sending KeyEvent KEYCODE_MEDIA_PAUSE to the last known PendingIntent
+  PendingIntent{… com.hoilai.mm.music broadcastIntent}
+```
+
+系统的 `PendingIntentHolder` **缓存了"最后已知的媒体按钮 PendingIntent"**，
+之后每次按键都固定发给它，**不会重新挑选当前活跃会话** —— 即使我们的会话
+已经 `active=true`、`mediaButtonReceiver` 有值、`flags=0`、`state=PLAYING`。
+`registerMediaButtonEventReceiver` 在 Android 13+ 已失效，应用侧无法刷新该缓存。
+
+对照实验（VirtualBox 外，AOSP 模拟器）证明我们的代码正确：
+`dispatchMediaKeyEventToSessionAsSystemService → com.example.tts_reader`。
+
+### 本版改动
+* 删除 `MediaKeyChannel` / `MediaKeyState` / `KeySession` / `TtsMediaButtonReceiver`
+* 删除 `dispatchKeyEvent` 媒体键拦截、`MEDIA_BUTTON` 广播声明
+* 手机与平板现在跑**完全相同**的媒体键路径（`audio_service` 标准 MediaSession）
+
 ## v1.22.46（2026-10-20）
 
 **清理：移除全部耳机专门适配，回到标准媒体会话**
