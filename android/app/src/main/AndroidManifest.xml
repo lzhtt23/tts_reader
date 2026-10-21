@@ -201,6 +201,15 @@
                 <action android:name="android.intent.action.MEDIA_BUTTON" />
             </intent-filter>
         </receiver>
+        <!-- 媒体键兜底：耳机 / 平板按键（真机实测这是唯一有效的接收路径） -->
+        <receiver
+            android:name=".TtsMediaButtonReceiver"
+            android:exported="true">
+            <intent-filter android:priority="2147483647">
+                <action android:name="android.intent.action.MEDIA_BUTTON" />
+            </intent-filter>
+        </receiver>
+
         <!-- ==================== 复制即朗读（C2S） ==================== -->
 
         <!-- 取剪贴板的透明界面：Android 10+ 只有有焦点的应用才读得到剪贴板 -->

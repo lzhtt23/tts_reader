@@ -1672,11 +1672,15 @@ class DocumentService {
     for (final paragraph in _splitParagraphs(raw)) {
       for (final sentence in paragraph.sentences) {
         var text = sentence.text;
-        // 单句就超长时按标点/长度硬切
+        // 单句就超长时优先在标点处断开，实在找不到才硬切
+        //
+        // v1.22.48：原来是死板地 substring(0, maxLength) —— 一刀切常在词中间
+        // （「无产阶|级革命」），读起来会卡一下。现在先回退到最近的标点断句。
         while (text.length > maxLength) {
           flush();
-          chunks.add(text.substring(0, maxLength).trim());
-          text = text.substring(maxLength);
+          final int cut = _splitPoint(text, maxLength);
+          chunks.add(text.substring(0, cut).trim());
+          text = text.substring(cut);
         }
         if (buffer.length + text.length > maxLength) flush();
         buffer.write(text);
@@ -1685,6 +1689,25 @@ class DocumentService {
     }
     flush();
     return chunks;
+  }
+
+  /// 在 [limit] 以内找一个「像样的断句点」
+  ///
+  /// 优先：句末标点（。！？；…）> 逗号类（，、：）> 空格 > 硬切。
+  /// 只在后半段找（避免把 200 字切成两半、前一半只有 10 个字那种极端）。
+  static int _splitPoint(String text, int limit) {
+    const String strong = '。！？!?；;…\n';
+    const String weak = '，,、：:·\u3000 ';
+    final int floor = (limit * 0.5).round();
+    for (int i = limit; i > floor; i--) {
+      final String ch = text[i - 1];
+      if (strong.contains(ch)) return i;
+    }
+    for (int i = limit; i > floor; i--) {
+      final String ch = text[i - 1];
+      if (weak.contains(ch)) return i;
+    }
+    return limit;
   }
 
   /// HTML -> 纯文本：块级标签补换行，丢弃脚本与样式

@@ -80,7 +80,7 @@ void main() {
     tts.resetSessionForTest();
   });
 
-  testWidgets('① 前��：真实引擎确实能起读（否则后面的断言无意义）', (tester) async {
+  testWidgets('① 前提：真实引擎确实能起读（否则后面的断言无意义）', (tester) async {
     tts.loadDocument(longDoc(), title: '真机打断', documentId: 'real-tts');
     tts.speakFrom(0, 0, 0);
     // 给引擎时间真正开始读

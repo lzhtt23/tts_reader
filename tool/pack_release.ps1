@@ -59,7 +59,11 @@ $PublishEntries = @(
 # --- never copied, even inside the entries above --------------------------
 $ExcludeDirs = @('.dart_tool', 'build', 'dist', 'release', '.gradle', '.idea', '.vscode')
 $ExcludeFiles = @('*.iml', 'local.properties', '.flutter-plugins', '.flutter-plugins-dependencies',
-                  '*.jks', '*.keystore', '*.log')
+                  '*.jks', '*.keystore', '*.log',
+                  # NOTE 2026-10-21: a 2.1 GB JVM heap dump (java_pidNNNN.hprof) landed in
+                  # android\ after a Gradle OOM and got copied into the publish tree, making
+                  # the source zip 190 MB. Heap dumps are never source; exclude them.
+                  '*.hprof')
 # NOTE 2026-10-18: gradle-wrapper.jar was in this exclude list until it silently
 # deleted the file from the GitHub repo (the v1.21.53 incident, again). The jar is
 # tracked by git (`.gitignore` does not ignore it), so it MUST be published.

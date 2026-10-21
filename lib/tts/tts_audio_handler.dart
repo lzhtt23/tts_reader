@@ -5,6 +5,7 @@ import 'package:audio_session/audio_session.dart';
 import 'package:flutter/widgets.dart';
 
 import '../services/crash_log.dart';
+import '../services/media_key_state.dart';
 import '../features/pdf_reading/pdf_read_session.dart';
 import 'audio_session_source.dart';
 import 'media_interruption.dart';
@@ -390,6 +391,7 @@ class TtsAudioHandler extends BaseAudioHandler {
   /// `TtsManager._restart` 里本来就是 `unawaited(requestFocus())`，这里对齐。
   @override
   Future<void> play() async {
+    MediaKeyState.noteSessionAction('play');
     // ★v1.21.54 诊断：把「这一拍播放究竟派发给谁」一次打全。
     //
     // 用户报「书A暂停 → 打开书B → 恢复却读书A」，但纯 Dart 层已实测 A 完全脱离
@@ -496,6 +498,7 @@ class TtsAudioHandler extends BaseAudioHandler {
   /// 于是紧接着按播放能直接读对书（不必按两次）。
   @override
   Future<void> pause() async {
+    MediaKeyState.noteSessionAction('pause');
     _diag('pause');
     MediaInterruptionController.instance.notifyUserPaused();
     // ★按前台派发：与 [play] 的 423-432 完全对称。
@@ -521,6 +524,7 @@ class TtsAudioHandler extends BaseAudioHandler {
 
   @override
   Future<void> stop() async {
+    MediaKeyState.noteSessionAction('stop');
     _diag('stop');
     await _manager.stop();
     await MediaInterruptionController.instance.releaseFocus();
@@ -548,6 +552,7 @@ class TtsAudioHandler extends BaseAudioHandler {
   /// `skipToPrevious / play|pause / skipToNext`，语义不变。
   @override
   Future<void> skipToNext() async {
+    MediaKeyState.noteSessionAction('next');
     _diag('skipToNext');
     _source.skipSentenceForward();
   }
@@ -555,6 +560,7 @@ class TtsAudioHandler extends BaseAudioHandler {
   /// 耳机「上一首」：**上一句**（同上，删掉「按章」分支）
   @override
   Future<void> skipToPrevious() async {
+    MediaKeyState.noteSessionAction('previous');
     _diag('skipToPrevious');
     _source.skipSentenceBackward();
   }

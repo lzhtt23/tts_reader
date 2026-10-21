@@ -48,6 +48,9 @@ class MainActivity : AudioServiceActivity() {
         LameChannel.attach(flutterEngine.dartExecutor.binaryMessenger)
         // 启动图标样式切换（tts_reader/icon：切 activity-alias，无需权限）
         IconChannel.attach(this, flutterEngine.dartExecutor.binaryMessenger)
+        // 耳机 / 媒体键：TtsMediaButtonReceiver 收到 ACTION_MEDIA_BUTTON 广播后经此转给
+        // Dart。少了这一句，接收器能收到按键却转不出去（channel 恒为 null）。
+        MediaKeyChannel.attach(flutterEngine.dartExecutor.binaryMessenger)
         // 引擎此刻才可用：把本次启动 intent 的文本补推一次
         deliverPending()
     }
@@ -62,6 +65,21 @@ class MainActivity : AudioServiceActivity() {
         setIntent(intent)
         captureIntent(intent)
     }
+
+    /**
+     * ⚠️ 这里**不要**再覆写 `dispatchKeyEvent` 转发媒体键（v1.22.53 已移除，教训）
+     *
+     * v1.22.52 曾经加上过：以为「有的 ROM 把媒体键当普通按键派给前台 Activity」。
+     * 结果**手机直接坏掉** —— 因为手机上系统既发 `MEDIA_BUTTON` 广播，
+     * 又会在 Activity 里派一次同一次按键，我们两条都接 → **一次按键执行两遍**
+     * （暂停又立刻播放，表现为完全没反应）。
+     *
+     * 去重是 300ms 内的**同种动作**，但两条路的时序可能差出几百毫秒，
+     * 而且中间还会穿插 MediaSession 那条路，靠去重压不住。
+     *
+     * 结论：**广播这一条路足够了**。平板收不到是真收不到（系统不发），
+     * 加 Activity 路径并不能救它，只会把手机弄坏。
+     */
 
     /** 解析 intent 并把文本存好；拿不到文本时保持原状 */
     private fun captureIntent(intent: Intent?) {

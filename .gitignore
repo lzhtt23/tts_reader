@@ -30,3 +30,8 @@ android/app/release/
 # 系统
 .DS_Store
 Thumbs.db
+
+# JVM 堆转储（Gradle OOM 会在 android/ 留下 2 GB 级的 java_pid*.hprof，
+# 2026-10-21 它被误打进源码包，让 zip 从 3.9 MB 涨到 190 MB）
+*.hprof
+*.hprof.gz

@@ -1899,13 +1899,33 @@ class TtsManager extends ChangeNotifier implements AudioSessionSource {
   /// 返回 null 表示「排队期间令牌失效」——旧循环已被新的朗读打断，本次调用没有执行，
   /// 调用方按「已打断」处理即可（不要当成朗读失败）。
   Future<T?> _serial<T>(String key, int? token, Future<T> Function() action) async {
+    // ★v1.22.49：排队**必须有上限**
+    //
+    // 真机反馈「朗读卡死」：如果占着锁的那次 speak 永远不返回（引擎 wedge /
+    // 蓝牙断开 / 进程被杀），下面这个 `await waiter.future` 就永久挂住，
+    // 之后每一次朗读都排在这条死队里 —— 表现就是整个朗读再也不动。
+    //
+    // 现在排队最多等 [controlTimeout]；超时按「没执行」返回 null，
+    // 调用方走既有分支收尾，不会把朗读循环一起拖死。
+    final DateTime queuedAt = DateTime.now();
     while (_lockHolders.containsKey(key)) {
       if (token != null && token != _generation) {
         return null; // 旧循环：别再抢插件
       }
+      if (DateTime.now().difference(queuedAt) > controlTimeout) {
+        CrashLog.mark('朗读排队超时（${controlTimeout.inSeconds}s）：'
+            '持有者可能已卡死，放弃本次排队');
+        return null;
+      }
       final waiter = Completer<void>();
       (_lockWaiters[key] ??= <Completer<void>>[]).add(waiter);
-      await waiter.future;
+      // 双保险：即使没人来唤醒，也不会永久挂住
+      try {
+        await waiter.future.timeout(controlTimeout);
+      } on TimeoutException {
+        CrashLog.mark('朗读排队等待超时（$key）');
+        return null;
+      }
     }
     if (token != null && token != _generation) return null;
     _lockHolders[key] = Completer<void>();

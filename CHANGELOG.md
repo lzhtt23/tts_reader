@@ -1,5 +1,140 @@
 # 更新日志
 
+## v1.22.55（2026-10-21）
+
+### 发布：手机耳机键可用版本
+
+这一版**只改了版本号**，代码与 v1.22.51 完全一致 ——
+那个版本在真机（一加 PKG110）上确认耳机键「暂停 / 继续」正常。
+
+之所以要单独发一版：v1.22.51 的 versionCode 是 213，
+而中间试错的 v1.22.54 是 216。安卓**不允许降级安装**，
+必须用更高的 versionCode 重新出包才能覆盖回去。
+
+#### 中间两版为什么坏了（教训）
+
+| 版本 | 改动 | 结果 |
+| --- | --- | --- |
+| v1.22.52 | 加了 `MainActivity.dispatchKeyEvent` 转发媒体键 | **手机耳机键完全失效** |
+| v1.22.53 | 再加 Toast 诊断 | 同上 |
+| v1.22.55 | 回到 v1.22.51 代码，只提升 versionCode | 正常 |
+
+`dispatchKeyEvent` 之所以会坏：手机上系统**既发 `MEDIA_BUTTON` 广播，
+又会在 Activity 里派一次同一次按键**。两条都转发 → 一次按键执行两遍
+（暂停又立刻播放），表现就是「完全没反应」。
+
+300ms 去重压不住这个问题：两条路的时序可能差出几百毫秒，
+中间还会穿插 MediaSession 那条路。
+
+**结论：广播一条路足够了，不要再加 Activity 直派。** `MainActivity` 里留了警示注释。
+
+#### 平板仍然不行
+
+平板（联想 TB335FC / ZUX OS）的系统**不广播媒体键**，应用层收不到，
+与手机是两回事。详见 HANDOFF §4.110 / §4.115。
+
+## v1.22.51（2026-10-21）
+
+### 重做：耳机 / 媒体键（原生不再判断状态）
+
+**这是耳机键的第二次实现，前两次都失败了，失败方式值得记住。**
+
+#### 前两次为什么失败
+
+v1.22.49 只是把被删的两处接线（Dart `attach()`、原生 `attach(messenger)`）补回去，
+v1.22.50 加 `proguard-rules.pro` 试图解决「类被 R8 删掉」—— 但那个判断本身是错的。
+
+错在哪：我用「`classes.dex` 里搜不到 `MediaKeyChannel` 字符串」来推断类被删除，
+而 **R8 会混淆类名**。类还在，只是改叫 `a.b.c`。用 `usage.txt`（列出被删项）
+和 `mapping.txt`（改名对照）核对后，v1.22.40 的类一直都在。
+
+#### 真正的根因
+
+原生 `MediaKeyChannel` 持有一个 `active` 字段：
+
+```kotlin
+if (!active) return          // ← 按键到这里就被丢掉，一行日志都不留
+```
+
+它由 Dart 通过 `setActive` 通道**异步、单次**通知，且带 60 秒滞回。两个必死缺陷：
+
+1. **单次通知会丢**：Dart 侧 `if (active == _lastActive) return;` 以为状态没变就不再发，
+   原生会**永远停在 `false`**，此后所有按键被丢弃；
+2. **滞回与实际按键时刻无关**：60 秒窗口的判定和用户按下那一刻的真实状态不对应。
+
+表现是最难查的那种：编译正常、安装正常、按下没反应、**日志里什么都没有**。
+
+#### 新实现
+
+原生侧**只翻译不判断**，判断全部移到 Dart：
+
+```
+耳机 → ACTION_MEDIA_BUTTON 广播
+     → TtsMediaButtonReceiver（无条件转发，只处理 ACTION_DOWN）
+     → MediaKeyChannel.onBroadcastKey(keyCode)（keyCode → 动作名）
+     → Dart MediaKeyChannel.handle()（300ms 去重 + 150ms 让位）
+     → audioHandler.play() / pause() / skipToNext() / skipToPrevious() / stop()
+```
+
+代价只是空闲时多一次无用调用，换来的是**永远不会因状态失步而静默丢键**。
+
+#### 附带
+
+* `TtsMediaButtonReceiver` 改用 `Log.i`（tag `TtsMediaKey`）：
+  `CrashLog` 只写应用私有文件，`adb logcat` 里看不到，排查时会被误导
+* 新增 `android/app/proguard-rules.pro`，显式保留 Manifest 声明的组件类
+  （不要用 `-keep class io.flutter.**`，会连带 Play Core 的缺失类导致 R8 失败）
+
+#### 验证
+
+* `flutter analyze` 零问题
+* Kotlin 编译通过，`usage.txt` 中无被删项
+* 真机（一加 PKG110）实测：**耳机键暂停 / 继续正常**
+
+> 平板（联想 TB335FC）仍不可用，原因是系统层不广播媒体键（见 HANDOFF §4.110），
+> 应用层无法解决。
+
+## v1.22.49（2026-10-21）
+
+### 修：耳机键恢复接收（TtsMediaButtonReceiver）
+v1.22.47 清理「平板专门适配」时，把这条兜底路径的**两处接线**一起删掉了，
+留下一个能收到按键却什么都做不了的接收器：
+
+* Dart 侧 `MediaKeyChannel.attach()` 没有调用 → 原生发来的 `mediaKey` / `log`
+  无人接收，`setActive` 也从未上报（原生 `active` 恒为 false）；
+* 原生侧 `MainActivity.configureFlutterEngine` 没有调用
+  `MediaKeyChannel.attach(messenger, …)` → `channel` 恒为 null，收到广播也转发不出去。
+
+两处都恢复。链路现在是完整的：
+
+```
+蓝牙耳机 → 系统 → ACTION_MEDIA_BUTTON 广播
+        → TtsMediaButtonReceiver → MediaKeyChannel.handleBroadcastKey
+        → Dart MediaKeyChannel.handle → 150ms 宽限（MediaSession 已处理则让位）
+        → audioHandler.play()/pause()/skipToNext()/skipToPrevious()/stop()
+```
+
+接收器、`<intent-filter priority=2147483647>`、通道类本来都还在，缺的只是接线；
+`active` 仍由「是否在朗读」控制，空闲时完全不碰按键，不影响其它应用。
+
+## v1.22.48（2026-10-20）
+
+### 修：朗读卡死
+`TtsManager._serial` 的排队**没有上限**：占着锁的那次 `speak` 若永不返回
+（引擎 wedge / 蓝牙断开），`await waiter.future` 就永久挂住，之后每次朗读
+都排进这条死队 —— 表现就是「朗读再也不动」。
+
+现在排队最多等 `controlTimeout`，超时按「没执行」返回，并把原因记进日志；
+朗读循环照常收尾，不会被一起拖死。
+
+### 修：长句分割切在词中间
+`DocumentService.readChunks` 遇到超长句时原来是 `substring(0, maxLength)`
+一刀切（「无产阶|级革命」）。现在优先回退到最近的标点断句：
+句末标点 > 逗号类 > 空格 > 硬切，且只在后半段范围内找。
+只切不改，拼回与原文一致。
+
+* `test/long_sentence_split_test.dart` + 3 条
+
 ## v1.22.47（2026-10-20）
 
 **去掉全部耳机/媒体键特别适配，手机与平板走同一套代码**
