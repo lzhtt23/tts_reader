@@ -48,6 +48,11 @@ $PublishEntries = @(
   'README.md',
   'CHANGELOG.md',
   'LICENSE',
+  # NOTE 2026-10-27: assets/icons/ is declared in pubspec.yaml (settings page icon
+  # previews) and is REQUIRED to build. It was missing from this whitelist, so every
+  # published tree could not be built by `flutter build apk`. Added here and committed
+  # to git the same day.
+  'assets',
   'lib',
   'android',
   'test',
