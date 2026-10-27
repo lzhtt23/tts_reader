@@ -2,33 +2,28 @@ import 'dart:async';
 
 import 'package:audio_service/audio_service.dart';
 import 'package:audio_session/audio_session.dart';
-import 'package:flutter/widgets.dart';
 
 import '../services/crash_log.dart';
-import '../services/media_key_state.dart';
+import '../services/device_info.dart';
+import '../services/storage_service.dart';
 import '../features/pdf_reading/pdf_read_session.dart';
 import 'audio_session_source.dart';
 import 'media_interruption.dart';
 import 'tts_manager.dart';
 
-/// 平板等「暂停后耳机键失效」的设备上为 true
+/// 媒体后台保活的两个开关，v1.22.57 起**恒为 false**（原按设备类型分叉，已删）。
 ///
-/// 让通知保持 ongoing，且暂停时也不退出前台服务 —— 这样系统才会一直把我们
-/// 当作媒体按键的接收方（`dumpsys media_session` 里 `Media button session`
-/// 不再变成 null）。手机实测旧值（false/false）正常，所以**按设备类型切换**，
-/// 不改手机的既有行为。
-bool get _keepAliveInBackground => _isTabletDevice();
-
-bool _isTabletDevice() {
-  try {
-    final view = WidgetsBinding.instance.platformDispatcher.views.first;
-    final double shortest =
-        view.physicalSize.shortestSide / view.devicePixelRatio;
-    return shortest >= 600;
-  } catch (_) {
-    return false;
-  }
-}
+/// 为什么删掉分叉：`androidStopForegroundOnPause: true` 会让 audio_service 在
+/// 暂停时 `exitForegroundState()` + `mediaSession.setActive(false)`
+/// （AudioService.java 的 exitPlayingState / exitForegroundState）→ 系统不再把
+/// 媒体键派给一个 inactive 会话 → 「暂停后按耳机没反应」，与 §4.116 修掉的是
+/// **同一类机制**。原分叉按「屏幕最短边 ≥ 600dp」判平板，折叠屏展开 /
+/// 大屏手机会被误判，恰好落进坏的那一支。
+///
+/// 而且分叉的前提本来就不成立：前台服务活着时系统本就把通知强制成 ongoing，
+/// 「暂停时划不掉通知」（v1.21.14 用户拍板的选项 B）在 false/false 下同样满足；
+/// 会话恒 active 反而正是耳机键需要的（enterPlayingState 里 setActive(true)）。
+const bool _keepAliveInBackground = false;
 
 /// 全局持有，避免被回收
 TtsAudioHandler? audioHandler;
@@ -117,6 +112,99 @@ class TtsAudioHandler extends BaseAudioHandler {
   /// 是否已经推过一次通知（用户按下播放前不打扰通知栏）
   bool _started = false;
 
+  /// 上次向系统「强开媒体键」的时间（节流用，见 [_forceMediaButtons]）
+  DateTime? _lastMediaButtonForce;
+
+  /// 强开媒体键的最小间隔：`_pushState()` 每读一句都会跑（约 3~6 秒一次），
+  /// 再加一道节流，避免短句时把平台通道刷爆。
+  static const Duration _mediaButtonForceInterval = Duration(seconds: 2);
+
+  /// **开播瞬间跳过强开**（v1.22.62 修「首次发声爆音」）
+  ///
+  /// ## 真机现象（用户 2026-10-26 报）
+  /// 用手机扬声器**第一次**发声时会「啪」一声爆音，之后正常。
+  ///
+  /// ## 为什么会响
+  /// `AudioService.androidForceEnableMediaButtons()` 内部会**新建并 play() 一段
+  /// 静音 `AudioTrack`**（`AudioServicePlugin.java` 的 `silenceAudioTrack`，
+  /// MODE_STATIC / 44100Hz / STREAM_MUSIC）。音频输出（尤其外放扬声器）刚从
+  /// 待机被唤醒时，第一个 AudioTrack 启动常带一次瞬态冲击 —— 就是那声「啪」。
+  /// **第二次起设备已经在跑，所以不再有**。
+  ///
+  /// 这条音轨在 audio_service 内部，改不了。能做的是**错开时序**：
+  /// 不在"按下播放的同一瞬间"建它，等 TTS 真正出声后再强开（通路已热）。
+  ///
+  /// 代价：开播后头一两秒耳机键可能没路由过来 —— 可接受，
+  /// 因为刚点播放大概率不会立刻按耳机键；而爆音每次开播都听得到。
+  ///
+  /// ⚠️ 不要改成 `Timer`：本工程踩过 —— handler 里未取消的定时器会让
+  /// `pause_front_dispatch_test` 等用例报"有未完成定时器"，且切源容易漏取消。
+  /// 用计数是纯状态，无生命周期问题。
+  static const int _firstForceSkipCalls = 0;
+
+  /// **是否使用静音音轨**（v1.22.62 A/B 实验结论：**必须保留**）
+  ///
+  /// ## 实验过程（真机，2026-10-27）
+  /// 置为 `false`（完全不用静音轨，只靠 `audio_service` 的 MediaSession）后，
+  /// 用户实测结论：**「开始可用，被别的媒体打断就失效」**。
+  ///
+  /// ## 为什么是这样（Android 的真实挑选规则）
+  /// 系统选"媒体键会话"时分两步：
+  /// 1. 先找一个**正在播放音频**的会话（`isPlaybackActive()`）；
+  /// 2. 都没有，才回退到优先级栈顶的那个。
+  ///
+  /// 于是：
+  /// - **刚开始**没有别的媒体在放 → 走第 2 步，栈顶是我们 → 耳机可用 ✅
+  /// - **别的 App 开始放音乐** → 它"正在播放" → 走第 1 步被它拿走 ❌
+  /// - **它暂停但会话没销毁** → 它仍在栈顶 → 第 2 步还是它 ❌
+  ///
+  /// TTS 只把音频交给系统语音引擎去发，**我们自己不产生音频**，
+  /// 所以永远不是"正在播放音频"的那个应用 —— 这就是静音轨存在的唯一理由：
+  /// **它让我们持续被算作"正在播放媒体"**，被打断后能自动抢回路由。
+  ///
+  /// ## 结论
+  /// 静音轨**不能删**。爆音要靠"只创建一次、且创建时机最早"来消除
+  /// （见 [prewarmMediaButtons] 与 `SystemTtsEngine._kWarmUpAudioPath`）。
+  ///
+  /// ---
+  /// ⚠️ **v1.22.62 T2S 风格实验期临时改为 `false`**：
+  /// 配合 `MediaInterruptionController._kT2sStyleNoFocus`（不申请焦点）一起验证
+  /// 「像 T2S 那样不被打断，是否就不需要静音轨」。
+  /// 实验结束后必须二选一定稿：要么恢复 `true`，要么确认可长期为 `false`。
+  /// 证据与对照数据见 `docs/2026-10-27-媒体键会话归属-虚拟机对照实验.md`。
+  /// 运行期从设置读取：`StorageService.instance.mediaButtonCompat`
+  ///
+  /// ✅ 已改为**用户可开关**（v1.22.62 · 用户建议）：见 [_shouldUseSilentTrack]。
+  /// 常量 `_kUseSilentTrack` 仅作历史记录保留，实际判定走设置值。
+
+  // ★★★ v1.22.62：**从 2 改回 0**
+  //
+  // 用户 2026-10-26 报：「平板冷启动开始朗读时，耳机没有立马接管，
+  // 需要启停两下才能控制媒体」。
+  //
+  // 这是我上一轮为修爆音做的取舍：跳过最初两次强开，让静音音轨晚一点建。
+  // 但这两次里恰好包含了**冷启动建立媒体会话**的关键时机 —— 跳过它，
+  // 系统在开播那一刻就没把媒体键路由到本应用，于是耳机要"启停两下"
+  // 才等到下一次强开生效。
+  //
+  // 判定：**耳机能控制是基本功能，爆音是次要瑕疵**。媒体键禁用者优先。
+  // 爆音改从别的方向处理（不牺牲媒体键接管时机），不要再来调这个数。
+  //
+  // 保留常量与计数逻辑（而不是直接删掉）是为了：
+  //   · 万一将来找到"只延后音频轨、不影响会话建立"的办法，这里还能调
+  //   · 让"为什么会跳过首次强开"这段历史留在代码里，避免后人重犯
+
+  /// 本次会话里 `_forceMediaButtons()` 被调用的次数（切源时清零）
+  ///
+  /// 前 [_firstForceSkipCalls] 次**直接跳过**，不调平台通道。
+  ///
+  /// 为什么用"跳过次数"而不是 Timer：本工程有过教训 —— 在 handler 里起
+  /// 未取消的 `Timer` 会让 `pause_front_dispatch_test` 等用例报"有未完成定时器"，
+  /// 而且切源/停止时容易漏取消，定时器打到已经换掉的会话上。
+  /// 计数是纯状态，没有生命周期问题，测试也不需要额外清理。
+  int _forceCallCount = 0;
+
+
   /// 切到某个会话来源
   ///
   /// **幂等**：同 id 重复调用直接返回，否则每读一句都会重建通知、进度条乱闪。
@@ -138,6 +226,10 @@ class TtsAudioHandler extends BaseAudioHandler {
     }
     // 先让旧来源停手：否则它还会往通知栏推自己的状态（两本书抢一条通知）
     _source.onStop();
+    // ★v1.22.62：换源 = 新的一场播放 → 跳过计数与节流一起复位，
+    // 让新会话同样避开"开播瞬间"那两次（否则爆音又回来）。
+    _forceCallCount = 0;
+    _lastMediaButtonForce = null;
     _source = source;
     _sourceId = source.sourceId;
     // 新来源一上来就推一次状态，通知栏立刻显示正确内容。
@@ -165,26 +257,15 @@ class TtsAudioHandler extends BaseAudioHandler {
       await session.configure(const AudioSessionConfiguration.speech());
       final handler = await AudioService.init(
         builder: () => TtsAudioHandler(TtsManager.instance),
-        // not const: the two background-keepalive flags are resolved at runtime
-        config: AudioServiceConfig(
+        config: const AudioServiceConfig(
           androidNotificationChannelId: _notificationChannelId,
           androidNotificationChannelName: '朗读控制',
           androidNotificationChannelDescription: '显示朗读进度并控制播放',
-          // ⚠️ 这两个必须**成对**为 false：audio_service 里有断言
-          // `assert(!androidNotificationOngoing || androidStopForegroundOnPause)`。
-          //
-          // 语义没变差：前台服务活着时，系统本来就会把通知强制成 ongoing，
-          // 所以「暂停时划不掉」这条依旧成立（= 用户选的 B）；
-          // 而 active 的 FGS 正好保证熄屏/后台时媒体键还有人处理。
+          // 恒为 false（v1.22.57，见文件头注释）：暂停不退出前台服务、不置会话
+          // inactive —— 系统才会一直把媒体键派给本会话（耳机键「暂停后再按」
+          // 那条路径依赖它）。前台服务活着时系统本就把通知强制成 ongoing，
+          // 「暂停时划不掉」依旧成立。
           androidNotificationOngoing: _keepAliveInBackground,
-          // v1.21.14 任务②（用户拍板选 B）：**暂停也不退出前台服务**。
-          //
-          // 原值 true 的代价（实测）：暂停即退出前台服务 → 熄屏 + 后台时，
-          // Android 12+ 限制后台重启前台服务、进程也可能被冻结 →
-          // 耳机/通知栏的「播放」键**根本没人处理**：
-          //   亮屏：79 暂停 ✓ / 126 播放 ✓ / 85 ✓
-          //   熄屏：79 暂停 ✓，126/85 **完全无反应**（连一次状态都没推）
-          // 换成 false 后，熄屏 / 后台也能用耳机恢复播放。
           androidStopForegroundOnPause: _keepAliveInBackground,
           androidNotificationIcon: 'drawable/ic_stat_speech',
         ),
@@ -193,7 +274,11 @@ class TtsAudioHandler extends BaseAudioHandler {
       // 应用启动就把音频属性 / 打断监听装好，并按设置择一配置
       await MediaInterruptionController.instance.applySettings();
       return handler;
-    } catch (_) {
+    } catch (e, st) {
+      // ★v1.22.57：失败必须留痕。吞掉它的后果是 audioHandler=null、前台服务没起、
+      // MediaSession 不存在 → 耳机键**全废且一行日志都没有**（§4.115.3 反复强调
+      // 要避免的静默失败形态）。不抛出：保持原「桌面 / 测试环境返回 null」的契约。
+      CrashLog.record('AudioService.init 失败', e, st);
       return null;
     }
   }
@@ -257,6 +342,47 @@ class TtsAudioHandler extends BaseAudioHandler {
     // 不清的后果（真机日志 2026-10-15 00:25 实证）：用户看完视频手动恢复后，
     // 标志留成 true → **下一个视频会被当成"已经让位过"而不再让位**。
     if (playing) MediaInterruptionController.instance.notifyUserResumed();
+    // ★v1.22.59（§4.119 候选①）：**只要真的在播，就向系统强开一次媒体键路由**。
+    //
+    // 为什么需要：TTS 不是"真音频"——它不写 `AudioTrack`，系统在挑选"媒体键会话"
+    // 时不会把它当成正在放音的媒体。`audio_service` 官方为此提供了
+    // `AudioService.androidForceEnableMediaButtons()`：内部播一小段静音
+    // （`AudioServicePlugin.java` 的 `silenceAudioTrack`，2048 字节、MODE_STATIC、
+    // 44100Hz、STREAM_MUSIC），骗过系统的 `isPlaying` 判定，
+    // 从而让媒体键路由到本会话。官方文档原话：
+    // 「necessary if you want to play TextToSpeech in the background and
+    //  still respond to media button events」。
+    //
+    // ★★★ v1.22.62：**从 `if (playing)` 改成 `if (hasSession)`**
+    //
+    // ## 修什么问题（用户 2026-10-26，平板）
+    // > 「应用冷启动开始朗读时，耳机没有立马接管，需要启停两下才能控制媒体」
+    //
+    // ## 为什么"启停两下才行"
+    // 原来只在 `playing == true` 时才强开媒体键。冷启动的时间线是：
+    // ```
+    // t0  用户点播放
+    // t0  _pushState() → 强开媒体键 → 平台通道往返 + 新建静音 AudioTrack（要几十毫秒）
+    // t1  用户立刻按耳机键 ← 此时系统还没把本应用当成"正在放音的媒体" → 按键落空
+    // t2  再按一次 ↓ 系统此时才认到 → 生效
+    // ```
+    // 用户感受到的就是"按两下才管用"。
+    //
+    // ## 修法：把"建立媒体会话语"提前到**打开文档的那一刻**
+    // 只要 `hasSession`（文档已打开、会话存在），就强制路由一次。
+    // 这样用户点播放之前，系统的媒体键路由**已经指向本应用**，
+    // 第一次按耳机键就能命中。
+    //
+    // 为什么可以提前：`androidForceEnableMediaButtons()` 播的是**静音**音轨，
+    // 提前建立对用户没有任何声音/界面影响（通知卡片仍由 `_started` 控制）。
+    //
+    // ## 保留每句一次的重复强开
+    // `_pushState()` 每读一句都会跑，`hasSession` 期间持续复强，
+    // 保证"播放中被别的 App 抢走路由"之后能自己抢回来（这是原有行为）。
+    //
+    // ⚠️ **耳机控制优先级最高**（用户 2026-10-26 明确）：爆音是次要瑕疵，
+    // 任何改动都不得牺牲媒体键接管的及时性。若两者冲突，先保耳机控制。
+    if (hasSession) _forceMediaButtons();
     // v1.21.43 埋点：**非 idle 的推送**以前没有日志，导致真机手测 ② 只能猜
     // （「应用内恢复后通知栏图标没变」到底是我们没推、还是推了 ROM 没重绘）。
     // 这条每次推送只打一行，低频（每句一次），加进来能把责任分清楚。
@@ -343,6 +469,122 @@ class TtsAudioHandler extends BaseAudioHandler {
         'paused=${source.paused}');
   }
 
+  /// 向系统强开媒体键路由（`audio_service` 的静音音轨法）
+  ///
+  /// 见 `_pushState()` 里调用点的长注释。要点：
+  /// - **失败不能影响播放** —— 平台通道异常（桌面 / 测试 / 旧 ROM）一律吞掉只记日志；
+  /// - **节流** —— `_pushState()` 每读一句跑一次，重复调用只是重复 `play()`；
+  /// - **不 await** —— 这是平台往返，等它会拖慢出声。
+  ///
+  /// ⚠️ **不需要**再自己加周期定时器：`AudioServicePlugin.java` 里那条音轨是
+  /// `MODE_STATIC` + `write()` 一次 + `reloadStaticData()` + `play()`，**没有 stop** ——
+  /// `MODE_STATIC` 下 `play()` 会一直循环播那 2048 字节静音，直到显式停止。
+  /// 也就是说调一次就持续有效，系统的「本应用在放音」判定会一直成立。
+  /// （先前误以为它只响 46ms、加过周期定时器，结果在 widget 测试里留下
+  ///  pending timer 把用例弄红 —— 已删。）
+  /// 是否启用静音音轨兜底（读设置，默认关）
+  ///
+  /// ## 为什么要做成开关（用户 2026-10-27 建议）
+  /// 多数设备靠 `audio_service` 自带的 MediaSession 就能收到耳机键，
+  /// 此时**完全不需要静音音轨**——也就**完全没有那声"啪"**（那条轨是爆音的唯一来源）。
+  ///
+  /// 但少数系统（ColorOS 系实测）在别的媒体播放/暂停后会夺走媒体键归属，
+  /// 那时需要静音音轨把自己伪装成"正在播放的媒体"把归属抢回来。
+  ///
+  /// 所以把它做成**托底开关**：默认关（干净），需要的设备才打开（接受一声"啪"）。
+  ///
+  /// 证据见 `docs/2026-10-27-媒体键会话归属-虚拟机对照实验.md`。
+  bool get _shouldUseSilentTrack =>
+      StorageService.instance.mediaButtonCompat.value;
+
+  void _forceMediaButtons() {
+    // ★v1.22.62：开播瞬间的两次调用**跳过**，避开外放「啪」一声。
+    // 详见 [_firstForceSkipCalls]（audio_service 会新建静音 AudioTrack，
+    // 冷启动第一次带瞬态冲击）。
+    _forceCallCount++;
+    if (_forceCallCount <= _firstForceSkipCalls) return;
+
+    final DateTime now = DateTime.now();
+    final DateTime? last = _lastMediaButtonForce;
+    if (last != null && now.difference(last) < _mediaButtonForceInterval) return;
+    _lastMediaButtonForce = now;
+    _reallyForce();
+  }
+
+  /// **提前建立静音轨**（v1.22.62）
+  ///
+  /// ⚠️ **当前没有任何调用点，这是有意的 —— 不要再随手加回去。**
+  ///
+  /// 三个时机都试过（真机，2026-10-27）：
+  /// ```
+  /// 开始朗读时建（默认路径）→ 瞬态紧挨第一句，被语音起始盖住   ← 最终采用
+  /// 打开文档时建（曾用）    → 用户明确听到"啪"，已否决
+  /// 应用启动时建（曾用）    → 环境安静，"啪"更突兀，用户要求挪回朗读时
+  /// ```
+  /// 因为这条轨**播的是静音**，"啪"来自音频通路上电、与数据无关，
+  /// 无法消除，只能挑最容易掩盖的时刻。所以让它走默认路径
+  /// （第一次 `_pushState()` 里 `_forceMediaButtons()`）即可。
+  ///
+  /// 保留方法体是为了将来若真要改时机，证据链还在这里。
+  ///
+  /// ## 真机证据（2026-10-27 01:01，平板，logcat AudioTrack 行）
+  /// ```
+  /// 01:01:30.018  AF[起读]                                  ← 用户按播放
+  /// 01:01:30.036  AudioTrack start pkg=com.example.tts_reader ← 我们的静音轨
+  /// 01:01:30.225  AudioTrack start pkg=org.nobody.multitts   ← 第一句真正出声
+  /// ```
+  /// 结论：**那声"啪"是我们自己这条静音轨发出的**。
+  ///
+  /// 为什么可以这样断定 TTS 引擎不是主源：引擎那条轨在整段朗读里
+  /// **指针始终是同一个**（`0xb40000783d33be40`，4990/4992/4993/4995 全是它），
+  /// 说明引擎复用一条轨、不会每次新建；而我们的轨只在"开播那一瞬"出现一次
+  /// （start 4991），正好对上"只有冷启动/久停后才响"的现象。
+  ///
+  /// ## 修法
+  /// 在**文档打开时**就把它建起来（此时还没出声，瞬态落在静音期）。
+  /// 只改**时机**，不改能力：轨道照样常驻，媒体键接管不受影响
+  /// （用户明确要求耳机优先，这里没有牺牲它）。
+  void prewarmMediaButtons() {
+    if (_forceCallCount > 0) return; // 已经建过就不再重复建
+    // 记成"已过跳过阶段"，后续 `_forceMediaButtons()` 不会因为计数被拦；
+    // 同时刷新节流时间戳，避免紧接着的第一次 `_pushState` 又建一条。
+    _forceCallCount = _firstForceSkipCalls + 1;
+    _lastMediaButtonForce = DateTime.now();
+    CrashLog.mark('媒体键[预热] 应用启动即建静音轨（唯一一次瞬态落在启动期）');
+    _reallyForce();
+  }
+
+  /// 真正调用平台通道（拆出来是为了让"首次延迟"和"日常节流"共用一条路径）
+  void _reallyForce() {
+    // ★★★ v1.22.62 实验开关：**关掉静音轨，只留 audio_service 自带的 MediaSession**
+    //
+    // ## 为什么做这个实验
+    // 那声"啪"已确证来自这条静音轨（真机 logcat：`AudioTrack start pkg=com.example.tts_reader`
+    // 正好出现在开播瞬间）。之前的做法只是把瞬态挪到应用启动，**没有根除**。
+    //
+    // ## 依据
+    // `audio_service 0.18.17` 在 Android 侧**本来就会创建一个 MediaSessionCompat**
+    // 并设置 PlaybackState / actions。`androidForceEnableMediaButtons()` 是在它之上
+    // 额外加的一条"静音音轨"，用来让系统把本应用算作"正在放音的媒体"。
+    //
+    // 也就是说：**媒体键的会话基础已经存在**，静音轨可能只是多余的加固。
+    // 关掉它若耳机仍可用 → 爆音根除（那条音轨不再被创建）。
+    // 若不可用 → 说明它是必需代价，把下面开关改回 true 即可（锚点 anchor-test32）。
+    //
+    // ## 实验方法
+    // 置 false 出包 → 冷启动 → 打开书 → 按耳机键试播放/暂停。
+    // 日志会打 `媒体键[静音轨已禁用]`，可确认开关真的生效。
+    if (!_shouldUseSilentTrack) {
+      CrashLog.mark('媒体键[静音轨已禁用] 仅依赖 audio_service 的 MediaSession');
+      return;
+    }
+    unawaited(
+      AudioService.androidForceEnableMediaButtons().catchError((Object e) {
+        CrashLog.mark('媒体键[强开失败] $e');
+      }),
+    );
+  }
+
   /// 当前是否处于播放中（供界面查询通知栏状态）
   ///
   /// ⚠️ v1.21.14 任务②：**直读来源**，不再自己存一份 `_lastPlaying`。
@@ -391,7 +633,7 @@ class TtsAudioHandler extends BaseAudioHandler {
   /// `TtsManager._restart` 里本来就是 `unawaited(requestFocus())`，这里对齐。
   @override
   Future<void> play() async {
-    MediaKeyState.noteSessionAction('play');
+    CrashLog.mark('媒体控制[play]');  // v1.22.57：原 MediaKeyState 记账随广播死代码一并清除，只留日志
     // ★v1.21.54 诊断：把「这一拍播放究竟派发给谁」一次打全。
     //
     // 用户报「书A暂停 → 打开书B → 恢复却读书A」，但纯 Dart 层已实测 A 完全脱离
@@ -422,8 +664,16 @@ class TtsAudioHandler extends BaseAudioHandler {
     //
     // 不这么做的话，按"暂停"会走到 `playFromCursor()` = **从当前句重播**
     // （用户原话："按暂停反而重播"）。
-    if (_source.hasSession && _source.playing && !_source.paused) {
-      _diag('play→pause（ROM 兼容）');
+    //
+    // ★v1.22.58（§4.119）：**必须限定在 ColorOS 系**。
+    // 这条规则原先无条件执行，而它是 ColorOS 的 ROM 行为 —— 在别的 ROM 上
+    // （联想平板 ZUI）「按播放」会被当成「暂停」，表现为**永远恢复不了**。
+    // 判据走 `DeviceInfo.isColorOs()`；取不到时返回 false（宁可不兼容，不误伤）。
+    if (DeviceInfo.isColorOsSync &&
+        _source.hasSession &&
+        _source.playing &&
+        !_source.paused) {
+      _diag('play→pause（ColorOS 兼容）');
       return pause();
     }
     // ★v1.21.57：当前来源**已经没有会话**时，把播放交给还活着的那个来源。
@@ -498,7 +748,7 @@ class TtsAudioHandler extends BaseAudioHandler {
   /// 于是紧接着按播放能直接读对书（不必按两次）。
   @override
   Future<void> pause() async {
-    MediaKeyState.noteSessionAction('pause');
+    CrashLog.mark('媒体控制[pause]');  // v1.22.57：原 MediaKeyState 记账随广播死代码一并清除，只留日志
     _diag('pause');
     MediaInterruptionController.instance.notifyUserPaused();
     // ★按前台派发：与 [play] 的 423-432 完全对称。
@@ -524,7 +774,7 @@ class TtsAudioHandler extends BaseAudioHandler {
 
   @override
   Future<void> stop() async {
-    MediaKeyState.noteSessionAction('stop');
+    CrashLog.mark('媒体控制[stop]');  // v1.22.57：原 MediaKeyState 记账随广播死代码一并清除，只留日志
     _diag('stop');
     await _manager.stop();
     await MediaInterruptionController.instance.releaseFocus();
@@ -552,7 +802,7 @@ class TtsAudioHandler extends BaseAudioHandler {
   /// `skipToPrevious / play|pause / skipToNext`，语义不变。
   @override
   Future<void> skipToNext() async {
-    MediaKeyState.noteSessionAction('next');
+    CrashLog.mark('媒体控制[next]');  // v1.22.57：原 MediaKeyState 记账随广播死代码一并清除，只留日志
     _diag('skipToNext');
     _source.skipSentenceForward();
   }
@@ -560,7 +810,7 @@ class TtsAudioHandler extends BaseAudioHandler {
   /// 耳机「上一首」：**上一句**（同上，删掉「按章」分支）
   @override
   Future<void> skipToPrevious() async {
-    MediaKeyState.noteSessionAction('previous');
+    CrashLog.mark('媒体控制[previous]');  // v1.22.57：原 MediaKeyState 记账随广播死代码一并清除，只留日志
     _diag('skipToPrevious');
     _source.skipSentenceBackward();
   }

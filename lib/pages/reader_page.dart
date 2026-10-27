@@ -66,7 +66,8 @@ bool isUserScrollNotification(ScrollNotification notification) {
 bool shouldPauseAfterOpen({
   required bool wasPlayingBeforeLoad,
   required bool nowPlaying,
-}) => !wasPlayingBeforeLoad && nowPlaying;
+}) =>
+    !wasPlayingBeforeLoad && nowPlaying;
 
 /// 外推定位的**单轮位移上限**（像素）。
 /// 目标段落很远时 `(target - reference) * perBlock` 会一次算出上万像素
@@ -157,7 +158,8 @@ class ReaderPage extends StatefulWidget {
   static const Key locateButtonKey = ValueKey<String>('reader-locate-button');
 
   /// 「返回朗读页」按钮（用户离开朗读位置时出现）
-  static const Key backToReadingKey = ValueKey<String>('reader-back-to-reading');
+  static const Key backToReadingKey =
+      ValueKey<String>('reader-back-to-reading');
 
   /// 控制中心里的上一页 / 下一页按钮
   static const Key previousPageKey = ValueKey<String>('reader-prev-page');
@@ -187,7 +189,8 @@ class ReaderPage extends StatefulWidget {
   static const Key autoFormatKey = ValueKey<String>('reader-auto-format');
 
   /// 正文里**正在朗读的那一句**所在的文本块（用例据此量它在屏幕上的位置）
-  static const Key activeSentenceKey = ValueKey<String>('reader-active-sentence');
+  static const Key activeSentenceKey =
+      ValueKey<String>('reader-active-sentence');
 
   /// 扫描件（图片型 PDF）在阅读页顶部横幅上那行提示
   ///
@@ -196,8 +199,7 @@ class ReaderPage extends StatefulWidget {
   /// 应用内**不做 OCR**（准确率没保证，以后可能走 AI 接口做识别 + 翻译），
   /// 所以提示**不承诺 OCR**，只说清：**能正常翻阅**、**朗读不了**。
   /// 公开常量便于单测断言文案（见 `test/scanned_pdf_hint_test.dart`）。
-  static const String scannedPdfHint =
-      '这是扫描件（图片型 PDF），没有文字层，无法朗读。'
+  static const String scannedPdfHint = '这是扫描件（图片型 PDF），没有文字层，无法朗读。'
       '可以正常翻页阅读，只是点句朗读用不了。';
 
   @override
@@ -282,7 +284,9 @@ class _ReaderPageState extends State<ReaderPage> {
     if (_paging.isEmpty) return null;
     final document = _doc;
     if (document == null) return null;
-    if (page.chapter < 0 || page.chapter >= document.chapters.length) return null;
+    if (page.chapter < 0 || page.chapter >= document.chapters.length) {
+      return null;
+    }
     final paragraphs = document.chapters[page.chapter].paragraphs;
     final lastParagraph = page.paragraphEnd - 1;
     if (lastParagraph < 0 || lastParagraph >= paragraphs.length) return null;
@@ -396,7 +400,6 @@ class _ReaderPageState extends State<ReaderPage> {
 
   /// 上一次缩放级别（用控制器通知判断「是不是在缩放」）
 
-
   /// PDF 页面区尺寸（高亮框按它做坐标换算）
   Size _pdfViewport = Size.zero;
 
@@ -493,7 +496,7 @@ class _ReaderPageState extends State<ReaderPage> {
     _followLog(
       '游标',
       '章=${cursor.$1} 段=${cursor.$2} 句=${cursor.$3} '
-      'speaking=${_tts.speaking} playing=${_tts.playing} paused=${_tts.paused}',
+          'speaking=${_tts.speaking} playing=${_tts.playing} paused=${_tts.paused}',
     );
     // 朗读位置变了，按钮的显示也要跟着刷（用户可能停在同一页的另一段，
     // 也可能已经翻到别的页）—— 只在滚动通知里刷会漏掉这些情况。
@@ -669,7 +672,8 @@ class _ReaderPageState extends State<ReaderPage> {
       //   - `_lastSpot` 会变成重排前的坐标系；
       //   - `_pageIndexForParagraph` 也按重排前的段落算；
       //   两者混用就出现「从文档库返回朗读页时回不到原来那句」。
-      final autoFormat = StorageService.instance.isAutoFormat(widget.document.id);
+      final autoFormat =
+          StorageService.instance.isAutoFormat(widget.document.id);
       var finalDoc = document;
       var start = savedSpot;
       final canFormat = needBlocks && _pdfLines.isNotEmpty;
@@ -841,7 +845,8 @@ class _ReaderPageState extends State<ReaderPage> {
     }
     final document = _doc;
     if (document == null || document.chapters.isEmpty) {
-      _followLog('进入定位', 'spot=$spot 但文档未就绪（doc=${document == null ? "null" : "空章"}）');
+      _followLog(
+          '进入定位', 'spot=$spot 但文档未就绪（doc=${document == null ? "null" : "空章"}）');
       return;
     }
     final chapter = spot.$1.clamp(0, document.chapters.length - 1);
@@ -849,8 +854,8 @@ class _ReaderPageState extends State<ReaderPage> {
     _followLog(
       '进入定位',
       'spot=$spot 夹取章=$chapter 块数=${_blocks.length} '
-      'tts游标=${_tts.cursor} 视图位置=$_lastSpot 朗读位置=$_readingSpot '
-      '落定页=$_displayedPage 目标页=$_pageIndex',
+          'tts游标=${_tts.cursor} 视图位置=$_lastSpot 朗读位置=$_readingSpot '
+          '落定页=$_displayedPage 目标页=$_pageIndex',
     );
     if (_isPdf && !_pdfTextView) {
       // 原版式：一章即一页。文档还没加载完就先记下来，
@@ -926,8 +931,8 @@ class _ReaderPageState extends State<ReaderPage> {
       _followLog(
         '进入定位校验',
         '第${attempt + 1}轮 章=$chapter 段=$paragraph 句=$sentence 块=$block '
-        '句心=${top.toStringAsFixed(1)} 视口高=${h.toStringAsFixed(0)} '
-        '可见=$visible $_lastSentenceMeasure',
+            '句心=${top.toStringAsFixed(1)} 视口高=${h.toStringAsFixed(0)} '
+            '可见=$visible $_lastSentenceMeasure',
       );
       if (visible) {
         _followLog('进入定位完成', '章=$chapter 段=$paragraph 句=$sentence 已在视野内');
@@ -944,11 +949,13 @@ class _ReaderPageState extends State<ReaderPage> {
         '进入定位补正',
         '句心=${top.toStringAsFixed(1)} 不在可见区 → 对齐目标=${want.toStringAsFixed(1)}',
       );
-      await scroll.animateTo(
-        want,
-        duration: const Duration(milliseconds: 200),
-        curve: Curves.easeOutCubic,
-      ).catchError((Object _) {});
+      await scroll
+          .animateTo(
+            want,
+            duration: const Duration(milliseconds: 200),
+            curve: Curves.easeOutCubic,
+          )
+          .catchError((Object _) {});
     }
     _followLog('进入定位结束', '章=$chapter 段=$paragraph 句=$sentence 轮次用尽');
   }
@@ -1025,7 +1032,8 @@ class _ReaderPageState extends State<ReaderPage> {
   ///
   /// 真解析出来的 `result.pdfLines` 是**整份**的（812 页可能上百 MB），
   /// L2b-2 只留它的地图，页数据让 GC 回收、等翻到再按块读 —— 这就是本轮的内存收益。
-  void _indexPdfChunks(List<LinesChunkRef>? chunks, Map<int, List<PdfLineBox>>? lines) {
+  void _indexPdfChunks(
+      List<LinesChunkRef>? chunks, Map<int, List<PdfLineBox>>? lines) {
     final Map<int, LinesChunkRef> map = <int, LinesChunkRef>{};
     if (chunks != null) {
       for (final LinesChunkRef ref in chunks) {
@@ -1059,7 +1067,8 @@ class _ReaderPageState extends State<ReaderPage> {
   ///
   /// - 块读可用 → 只留地图，按模式装页（文本模式读满全部块 / 原版式只装当前块）；
   /// - 块读不可用 → **整份表留在内存**（降级），一行都不裁。
-  void _adoptPdfLines(ParseResult result, int startPage, {required bool textMode}) {
+  void _adoptPdfLines(ParseResult result, int startPage,
+      {required bool textMode}) {
     _indexPdfChunks(result.linesChunks, result.pdfLines);
     _pdfLines.clear();
     _pdfLinesLoadedPages.clear();
@@ -1255,7 +1264,9 @@ class _ReaderPageState extends State<ReaderPage> {
       if (_readingSpot != null) _readingSpot!,
     ];
     for (final candidate in candidates) {
-      if (candidate.$1 < 0 || candidate.$1 >= document.chapters.length) continue;
+      if (candidate.$1 < 0 || candidate.$1 >= document.chapters.length) {
+        continue;
+      }
       if (document.indexOfCursor(candidate) > document.indexOfCursor(spot)) {
         spot = candidate;
       }
@@ -1321,9 +1332,9 @@ class _ReaderPageState extends State<ReaderPage> {
   /// PDF 原版式下 `$1` 是页码（一章即一页），文字模式下是段落下标。
   (int, int, int) _lastSpot = (0, 0, 0);
 
-
   /// 当前位置是否已有书签
-  Bookmark? get _bookmarkHere {    final spot = _currentSpot;
+  Bookmark? get _bookmarkHere {
+    final spot = _currentSpot;
     for (final bookmark in _bookmarks) {
       if (bookmark.matches(spot)) return bookmark;
     }
@@ -1366,7 +1377,9 @@ class _ReaderPageState extends State<ReaderPage> {
   /// 书签处的正文片段（用于在列表里辨认）
   String _previewAt((int, int, int) spot) {
     final document = _doc;
-    if (document == null || spot.$1 < 0 || spot.$1 >= document.chapters.length) {
+    if (document == null ||
+        spot.$1 < 0 ||
+        spot.$1 >= document.chapters.length) {
       return '';
     }
     final chapter = document.chapters[spot.$1];
@@ -1563,26 +1576,54 @@ class _ReaderPageState extends State<ReaderPage> {
             ],
           ),
           floatingActionButton: _speechDiagIndicator(),
+          // ★v1.22.62：body 改成 Stack —— 收起态是**悬浮键**，不能占正文高度。
+          //
+          // 用户 2026-10-27：「文字档的收起要和 PDF 一致」。
+          // PDF 那边收起后是右下角两枚悬浮键（展开箭头 + 暂停圆键），
+          // 正文高度不变；这里照做，所以收起态必须画在 Stack 里而不是 Column 里。
+          // ★v1.22.62：body 保持 Column（**不能改成 Stack** —— 实测会破坏点句朗读），
+          // 收起态的悬浮键改为**只在正文区域内部**叠加一层。
+          //
+          // 这样正文区域的高度/宽度与改动前完全一致 → 分页结果不变，
+          // 「点句朗读 / 跟随 / 回到朗读位置」这些对布局敏感的测试都不受影响。
           body: Column(
             children: <Widget>[
-              // 朗读字幕条紧贴导航栏下方（原版式下呈现当前朗读句）
               _captionBar(),
               if (_tts.error != null) _banner(_tts.error!, error: true),
-              if (_hasTextLayer == false)
-                _banner(
-                  // ★v1.21.45 改动 4：说硬话（文案是公开常量，单测直接断言）
-                  ReaderPage.scannedPdfHint,
+              if (_hasTextLayer == false) _banner(ReaderPage.scannedPdfHint),
+              Expanded(
+                child: Stack(
+                  children: <Widget>[
+                    _readingArea(cursor),
+                    // 收起态：右下角悬浮键（与 PDF 同一套形态）
+                    if (_doc != null &&
+                        _doc!.chapters.isNotEmpty &&
+                        _controlCollapsed)
+                      _collapsedControls(),
+                    // 展开态：**真正浮在正文之上**（用户 2026-10-27 平板反馈）
+                    //
+                    // 之前放在 Column 里：虽然限宽居中，但它仍占一整条布局高度，
+                    // 卡片两侧那条空白照样把正文顶上去 —— 看起来就是"两侧空白遮挡正文"。
+                    // 移到 Stack 后正文照常铺到底，只有卡片本身盖住一小块，
+                    // 两侧的正文依然看得见。
+                    if (_doc != null &&
+                        _doc!.chapters.isNotEmpty &&
+                        !_controlCollapsed)
+                      Positioned(
+                        left: 12,
+                        right: 12,
+                        bottom: 12,
+                        child: Center(
+                          child: ConstrainedBox(
+                            // 平板上不拉成通栏（手机 360dp 时这个上限不生效）
+                            constraints: const BoxConstraints(maxWidth: 560),
+                            child: _controls(),
+                          ),
+                        ),
+                      ),
+                  ],
                 ),
-              Expanded(child: _readingArea(cursor)),
-              // 控制栏：**关闭朗读模式后整条收起**（用户要求）。
-              //
-              // 注意与「折叠」的区别：折叠（[_controlCollapsed]）是用户自己按
-              // 收起键留下的 46dp 迷你条，这里说的是方块键关掉朗读模式之后
-              // **整条不再显示**，要重新朗读（PDF 点句 / 文本双击）它才回来。
-              // 控制栏：方块键关掉朗读模式后**收起成迷你条**（用户澄清过：
-              // 「收起」是截图里那种 46dp 的播放条，**不是**整条消失）。
-              // 迷你条留着才能一键继续读，位置信息也还在。
-              if (_doc != null && _doc!.chapters.isNotEmpty) _controls(),
+              ),
             ],
           ),
         );
@@ -1849,8 +1890,7 @@ class _ReaderPageState extends State<ReaderPage> {
   void _pdfPointerMove(PointerMoveEvent event) {
     _markPdfUserTouched();
     final start = _pdfPointerDownPos;
-    if (start != null &&
-        (event.localPosition - start).distance > kTouchSlop) {
+    if (start != null && (event.localPosition - start).distance > kTouchSlop) {
       _pdfPointerMoved = true;
     }
   }
@@ -2201,33 +2241,33 @@ class _ReaderPageState extends State<ReaderPage> {
               readerMaxContentWidth(context),
             );
             return Listener(
-                // 用户**拖动**正文（滑动翻页 / 滚动）= 自己翻着看：暂停自动跟随
-                // （想跟回来按「回到朗读页」）。与 PDF 原版式的「用户碰了页面就不跟」同义。
-                //
-                // ⚠️ 这里必须区分「点」和「拖」，不能一碰就关掉跟随。
-                // 用户报的「点下一句有概率导致文本框定位失败」根因就在这：
-                // 点句子朗读（以及点句切换）也是 `onPointerDown`，原来一律
-                // 把 `_pageAutoFollow` 置假 —— 而 `_followCursor` 开头就有
-                // `if (!_pageAutoFollow) return`，于是**从此再也不翻页**：
-                // 游标读到下一页的段落时页面不跟，那一页从没被建出来，
-                // 高亮框自然量不到（`rect == null`），看着就是「定位失败」。
-                //
-                // 判据：手指移动超过 `kTouchSlop` 才算「拖」；只是点一下不算。
-                onPointerDown: _onPagePointerDown,
-                onPointerMove: _onPagePointerMove,
-                onPointerUp: (_) => _pagePointerDragged = false,
-                onPointerCancel: (_) => _pagePointerDragged = false,
-                child: PageView.builder(
-                  key: ReaderPage.pageViewKey,
-                  controller: _pageController,
-                  itemCount: _paging.pageCount,
-                  onPageChanged: _onPageChanged,
-                  // PageView 铺满整屏：滑动从纸面任何位置都能接住，
-                  // 不再是「只有中间一栏能滑」
-                  itemBuilder: (context, index) =>
-                      _pageView(document, cursor, index),
-                ),
-                );
+              // 用户**拖动**正文（滑动翻页 / 滚动）= 自己翻着看：暂停自动跟随
+              // （想跟回来按「回到朗读页」）。与 PDF 原版式的「用户碰了页面就不跟」同义。
+              //
+              // ⚠️ 这里必须区分「点」和「拖」，不能一碰就关掉跟随。
+              // 用户报的「点下一句有概率导致文本框定位失败」根因就在这：
+              // 点句子朗读（以及点句切换）也是 `onPointerDown`，原来一律
+              // 把 `_pageAutoFollow` 置假 —— 而 `_followCursor` 开头就有
+              // `if (!_pageAutoFollow) return`，于是**从此再也不翻页**：
+              // 游标读到下一页的段落时页面不跟，那一页从没被建出来，
+              // 高亮框自然量不到（`rect == null`），看着就是「定位失败」。
+              //
+              // 判据：手指移动超过 `kTouchSlop` 才算「拖」；只是点一下不算。
+              onPointerDown: _onPagePointerDown,
+              onPointerMove: _onPagePointerMove,
+              onPointerUp: (_) => _pagePointerDragged = false,
+              onPointerCancel: (_) => _pagePointerDragged = false,
+              child: PageView.builder(
+                key: ReaderPage.pageViewKey,
+                controller: _pageController,
+                itemCount: _paging.pageCount,
+                onPageChanged: _onPageChanged,
+                // PageView 铺满整屏：滑动从纸面任何位置都能接住，
+                // 不再是「只有中间一栏能滑」
+                itemBuilder: (context, index) =>
+                    _pageView(document, cursor, index),
+              ),
+            );
           },
         ),
         // 「返回朗读页」：正在朗读、而用户已经离开朗读位置时出现。
@@ -2240,7 +2280,8 @@ class _ReaderPageState extends State<ReaderPage> {
         Positioned(
           right: 12,
           bottom: 12,
-          child: _backToReading ? _backToReadingButton() : const SizedBox.shrink(),
+          child:
+              _backToReading ? _backToReadingButton() : const SizedBox.shrink(),
         ),
       ],
     );
@@ -2258,7 +2299,8 @@ class _ReaderPageState extends State<ReaderPage> {
   ///
   /// 页内仍然是一个可滚动列表：小屏 / 大字号时一页的段落放不下，
   /// 硬撑会把文字挤没；语音推进时页内会跟着滚，读到最后一句才会翻到下一页。
-  Widget _pageView(StructuredDocument document, (int, int, int)? cursor, int index) {
+  Widget _pageView(
+      StructuredDocument document, (int, int, int)? cursor, int index) {
     final page = _paging.pageAt(index);
     // 大屏上页边距有下限（见 [_pageStyle]）；量句子用的是同一个 style
     final style = _pageStyle;
@@ -2299,8 +2341,7 @@ class _ReaderPageState extends State<ReaderPage> {
             // 用户要求：**滑动页面时不要误触朗读**。
             // 手指在滑动过程中抬起、或滑完立刻点一下，都可能是误触 ——
             // 这些点击一律不当作「点句」，见 [_scrollCooldownActive]。
-            _scrollCooldownUntil =
-                DateTime.now().add(_scrollCooldownWindow);
+            _scrollCooldownUntil = DateTime.now().add(_scrollCooldownWindow);
           }
           return false;
         },
@@ -2308,7 +2349,8 @@ class _ReaderPageState extends State<ReaderPage> {
         // 但正文只占中间这一栏，两侧是同一张纸的页边。
         child: Center(
           child: ConstrainedBox(
-            constraints: BoxConstraints(maxWidth: readerMaxContentWidth(context)),
+            constraints:
+                BoxConstraints(maxWidth: readerMaxContentWidth(context)),
             child: ListView.builder(
               key: ValueKey<String>('reader-page-$index'),
               controller: _pageScroll(index),
@@ -2320,33 +2362,35 @@ class _ReaderPageState extends State<ReaderPage> {
               ),
               itemCount: page.blockCount,
               itemBuilder: (context, local) {
-            final blockIndex = page.blockStart + local;
-            if (blockIndex < 0 || blockIndex >= _blocks.length) {
-              return const SizedBox.shrink();
-            }
-            final block = _blocks[blockIndex];
-            final child = switch (block) {
-              _ChapterBlock(:final chapter) =>
-                chapter < document.chapters.length
-                    ? _chapterHeader(document, chapter, cursor)
-                    : const SizedBox.shrink(),
-              _ParagraphBlock(:final chapter, :final paragraph) => _paragraphView(
-                  document,
-                  cursor,
-                  chapter,
-                  paragraph,
-                  style,
-                ),
-            };
-            // 每段挂一个 GlobalKey，两个用途：
-            // 1) `_revealBlock` 用它把目标段落滚进视野（`Scrollable.ensureVisible`）；
-            // 2) `_rememberVisibleSpot` 用它量出「视口顶端是哪一段」。
-            // **必须在渲染时创建**：早先只有「读取」没有「创建」（旧实现里是
-            // `_jumpToBlock` 顺便建的，重构时丢了），结果是 `_anchors` 恒为空 ——
-            // 于是「退出后返回朗读位置」既不滚也不准（`_lastSpot` 一直是 (0,0,0)）。
-            final anchor = _anchors.putIfAbsent(blockIndex, () => GlobalKey());
-            return KeyedSubtree(key: anchor, child: child);
-          },
+                final blockIndex = page.blockStart + local;
+                if (blockIndex < 0 || blockIndex >= _blocks.length) {
+                  return const SizedBox.shrink();
+                }
+                final block = _blocks[blockIndex];
+                final child = switch (block) {
+                  _ChapterBlock(:final chapter) =>
+                    chapter < document.chapters.length
+                        ? _chapterHeader(document, chapter, cursor)
+                        : const SizedBox.shrink(),
+                  _ParagraphBlock(:final chapter, :final paragraph) =>
+                    _paragraphView(
+                      document,
+                      cursor,
+                      chapter,
+                      paragraph,
+                      style,
+                    ),
+                };
+                // 每段挂一个 GlobalKey，两个用途：
+                // 1) `_revealBlock` 用它把目标段落滚进视野（`Scrollable.ensureVisible`）；
+                // 2) `_rememberVisibleSpot` 用它量出「视口顶端是哪一段」。
+                // **必须在渲染时创建**：早先只有「读取」没有「创建」（旧实现里是
+                // `_jumpToBlock` 顺便建的，重构时丢了），结果是 `_anchors` 恒为空 ——
+                // 于是「退出后返回朗读位置」既不滚也不准（`_lastSpot` 一直是 (0,0,0)）。
+                final anchor =
+                    _anchors.putIfAbsent(blockIndex, () => GlobalKey());
+                return KeyedSubtree(key: anchor, child: child);
+              },
             ),
           ),
         ),
@@ -2421,7 +2465,8 @@ class _ReaderPageState extends State<ReaderPage> {
       }
     }
     final paging = needBlocks
-        ? ReaderPaging.build(document, StorageService.instance.paragraphsPerPage)
+        ? ReaderPaging.build(
+            document, StorageService.instance.paragraphsPerPage)
         : ReaderPaging.empty;
     final pageIndex = start == null || paging.isEmpty
         ? 0
@@ -2443,7 +2488,8 @@ class _ReaderPageState extends State<ReaderPage> {
   }
 
   /// 试着重排：判据认为不需要重排时返回 null（不弹提示，由调用方决定要不要说）
-  StructuredDocument? _tryReflow(StructuredDocument document, {bool silent = false}) {
+  StructuredDocument? _tryReflow(StructuredDocument document,
+      {bool silent = false}) {
     final chapters = _reflowedChapters(document);
     if (chapters == null) {
       // 诊断日志**无条件**打：设备用例靠 `有变化=` 这个标记确认
@@ -2526,9 +2572,8 @@ class _ReaderPageState extends State<ReaderPage> {
   @visibleForTesting
   Map<String, Object?> debugFollowSnapshot() {
     final cursor = _tts.highlightCursor;
-    final block = cursor == null
-        ? -1
-        : _paragraphBlockIndex(cursor.$1, cursor.$2);
+    final block =
+        cursor == null ? -1 : _paragraphBlockIndex(cursor.$1, cursor.$2);
     return <String, Object?>{
       'cursor': cursor,
       'block': block,
@@ -2576,10 +2621,14 @@ class _ReaderPageState extends State<ReaderPage> {
   Map<String, Object?>? debugGeometryForSpot((int, int, int) spot) {
     final geometry = _geometryForCursor(spot);
     if (geometry == null) {
-      return <String, Object?>{'null': true, 'measureTag': _lastSentenceMeasure};
+      return <String, Object?>{
+        'null': true,
+        'measureTag': _lastSentenceMeasure
+      };
     }
     final block = _paragraphBlockIndex(spot.$1, spot.$2);
-    final measured = _measureSentenceInParagraph(block, spot.$1, spot.$2, spot.$3);
+    final measured =
+        _measureSentenceInParagraph(block, spot.$1, spot.$2, spot.$3);
     return <String, Object?>{
       'sentenceCenter': geometry.sentenceTop,
       'viewportHeight': geometry.height,
@@ -2920,7 +2969,8 @@ class _ReaderPageState extends State<ReaderPage> {
     if (topBlock < 0 || topOfParagraph == null) return;
     final block = _blocks[topBlock];
     if (block is! _ParagraphBlock) return;
-    final paragraph = document.chapters[block.chapter].paragraphs[block.paragraph];
+    final paragraph =
+        document.chapters[block.chapter].paragraphs[block.paragraph];
     // 段内偏了多少像素：用它反推该段里哪一句在顶端，重进时才能落到同一句，
     // 而不是「页对了、但停在段首」（那段在视口上方时按 0 算）。
     final sentence = _sentenceAtOffset(paragraph, -topOfParagraph);
@@ -2973,7 +3023,8 @@ class _ReaderPageState extends State<ReaderPage> {
     // 或者本页内那一句已经滚出可见范围（用户往下翻着看别处了）。
     var away = false;
     if (valid) {
-      if (_paging.pageIndexForParagraph(cursor.$1, cursor.$2) != _displayedPage) {
+      if (_paging.pageIndexForParagraph(cursor.$1, cursor.$2) !=
+          _displayedPage) {
         away = true;
       } else {
         final block = _paragraphBlockIndex(cursor.$1, cursor.$2);
@@ -3068,7 +3119,8 @@ class _ReaderPageState extends State<ReaderPage> {
       },
       onUserTap: AutoSleepController.instance.notifyUserActivity,
       onSentenceSpans: _onSentenceSpans,
-      cursorOnParagraph: _currentSpot.$1 == chapter && _currentSpot.$2 == paragraph,
+      cursorOnParagraph:
+          _currentSpot.$1 == chapter && _currentSpot.$2 == paragraph,
     );
   }
 
@@ -3131,9 +3183,8 @@ class _ReaderPageState extends State<ReaderPage> {
     final document = _doc;
     if (document == null) return;
     final active = _tts.activeDocumentId;
-    final readingOther = active != null &&
-        active != widget.document.id &&
-        _tts.hasSession;
+    final readingOther =
+        active != null && active != widget.document.id && _tts.hasSession;
     if (readingOther) {
       // 上一本文档还在朗读：先停掉它，否则两本书会一起响
       CrashLog.mark('切换文档：停止上一本的朗读（$active → ${widget.document.id}）');
@@ -3149,7 +3200,8 @@ class _ReaderPageState extends State<ReaderPage> {
   }
 
   /// 段落视图上报每句的字符区间（跟随滚动定位到句要用）
-  void _onSentenceSpans(int chapter, int paragraph, List<(int, int, int)> spans) {
+  void _onSentenceSpans(
+      int chapter, int paragraph, List<(int, int, int)> spans) {
     final key = '$chapter:$paragraph';
     final previous = _sentenceSpans[key];
     if (previous != null && _sameSpans(previous, spans)) return;
@@ -3447,7 +3499,7 @@ class _ReaderPageState extends State<ReaderPage> {
     _followLog(
       '定位开始',
       '块=$target 页=$pageIndex 当前落定页=$_displayedPage ${_anchorProbe(target)} '
-      '对齐=$alignment ${_followGates()}',
+          '对齐=$alignment ${_followGates()}',
     );
 
     // 页还没到位：先翻过去，等 PageView 把这一页建出来
@@ -3505,7 +3557,7 @@ class _ReaderPageState extends State<ReaderPage> {
         _followLog(
           '定位完成',
           '块=$target 第${attempt + 1}次尝试 ensureVisible(瞬时) '
-          '落点=${_pageScroll(_displayedPage).hasClients ? _pageScroll(_displayedPage).position.pixels.toStringAsFixed(1) : "?"}',
+              '落点=${_pageScroll(_displayedPage).hasClients ? _pageScroll(_displayedPage).position.pixels.toStringAsFixed(1) : "?"}',
         );
         return;
       }
@@ -3550,7 +3602,7 @@ class _ReaderPageState extends State<ReaderPage> {
     _followLog(
       '定位失败',
       '★块=$target 外推 10 轮后锚点仍未建出 ${_anchorProbe(target)} '
-      '偏移=${_pageScroll(_displayedPage).hasClients ? _pageScroll(_displayedPage).position.pixels.toStringAsFixed(1) : "无客户端"}',
+          '偏移=${_pageScroll(_displayedPage).hasClients ? _pageScroll(_displayedPage).position.pixels.toStringAsFixed(1) : "无客户端"}',
     );
   }
 
@@ -3664,7 +3716,8 @@ class _ReaderPageState extends State<ReaderPage> {
 
   /// 朗读推进时跟随：PDF 原版式跟页，分页版面按「读完本页才翻」翻页
   void _followCursor((int, int, int) cursor) {
-    _followLog('决策', '章=${cursor.$1} 段=${cursor.$2} 句=${cursor.$3} ${_followGates()}');
+    _followLog(
+        '决策', '章=${cursor.$1} 段=${cursor.$2} 句=${cursor.$3} ${_followGates()}');
     if (_isPdf && !_pdfTextView) {
       final page = cursor.$1 + 1;
 
@@ -3721,9 +3774,11 @@ class _ReaderPageState extends State<ReaderPage> {
       final readingForward = cursor.$1 > current.chapter ||
           (cursor.$1 == current.chapter && cursor.$2 >= current.paragraphEnd);
       if (!readingForward) {
-        _followLog('跳过', '目标页=$target≠当前页=$_pageIndex 但未向前读（段=${cursor.$2} '
-            '本页段范围=${current.paragraphStart}~${current.paragraphEnd} '
-            '当前页所在章=${current.chapter} 游标所在章=${cursor.$1}）');
+        _followLog(
+            '跳过',
+            '目标页=$target≠当前页=$_pageIndex 但未向前读（段=${cursor.$2} '
+                '本页段范围=${current.paragraphStart}~${current.paragraphEnd} '
+                '当前页所在章=${current.chapter} 游标所在章=${cursor.$1}）');
         return;
       }
       if (!_cursorFinishedPage(cursor, _displayedPage)) {
@@ -3794,7 +3849,7 @@ class _ReaderPageState extends State<ReaderPage> {
       _followLog(
         '几何失败',
         '块=$block ${_anchorProbe(block)} 段落可见=$visible '
-        '→ ${visible ? "不兜底（已可见，等下一句再试）" : "走段落兜底定位"}',
+            '→ ${visible ? "不兜底（已可见，等下一句再试）" : "走段落兜底定位"}',
       );
       if (!visible) _scheduleReveal(block);
       return;
@@ -3802,9 +3857,9 @@ class _ReaderPageState extends State<ReaderPage> {
     _followLog(
       '几何',
       '句顶=${geometry.sentenceTop.toStringAsFixed(1)} 视口高=${geometry.height.toStringAsFixed(1)} '
-      '上界=${(geometry.height * _visibleUpperBound).toStringAsFixed(1)} '
-      '下界=${(geometry.height * _visibleLowerBound).toStringAsFixed(1)} '
-      '占位=${(geometry.sentenceTop / geometry.height * 100).toStringAsFixed(0)}%',
+          '上界=${(geometry.height * _visibleUpperBound).toStringAsFixed(1)} '
+          '下界=${(geometry.height * _visibleLowerBound).toStringAsFixed(1)} '
+          '占位=${(geometry.sentenceTop / geometry.height * 100).toStringAsFixed(0)}%',
     );
 
     // ★v1.21.97：能量到几何 = 朗读句**确实在本页上**，这时视图位置就该等于朗读位置。
@@ -3827,7 +3882,8 @@ class _ReaderPageState extends State<ReaderPage> {
     final spans = _sentenceSpans[key];
     final span = spans?.where((item) => item.$1 == cursor.$3).toList();
     if (span == null || span.isEmpty) {
-      _followLog('跳过', '占位=$key 句号=${cursor.$3} 的字符区间还没上报（已缓存段=${_sentenceSpans.length}）');
+      _followLog('跳过',
+          '占位=$key 句号=${cursor.$3} 的字符区间还没上报（已缓存段=${_sentenceSpans.length}）');
       _ensureSentenceVisible();
       return;
     }
@@ -3958,8 +4014,12 @@ class _ReaderPageState extends State<ReaderPage> {
   /// 这是整套「跟随」的唯一判据来源 —— 位置分档之后各走各的处置，
   /// 避免再出现「两个回调各滚各的」互相拉扯。
   /// 量不到（段落没渲染 / 视口没就绪）返回 null，调用方按「不知道」处理。
-  ({double sentenceTop, double paragraphTop, double paragraphBottom, double height})?
-      _readingGeometry() {
+  ({
+    double sentenceTop,
+    double paragraphTop,
+    double paragraphBottom,
+    double height
+  })? _readingGeometry() {
     final cursor = _tts.highlightCursor;
     if (cursor == null) return null;
     return _geometryForCursor(cursor);
@@ -3973,8 +4033,12 @@ class _ReaderPageState extends State<ReaderPage> {
   /// 于是进入定位那条链永远拿不到几何 → 一句校验都做不了
   /// （真机日志表现：`[进入定位结束] 轮次用尽` 而 `[进入定位校验]` 一条都没有）。
   /// 进入定位要量的是「请求恢复的那个 spot」，所以游标由调用方给。
-  ({double sentenceTop, double paragraphTop, double paragraphBottom, double height})?
-      _geometryForCursor((int, int, int) cursor) {
+  ({
+    double sentenceTop,
+    double paragraphTop,
+    double paragraphBottom,
+    double height
+  })? _geometryForCursor((int, int, int) cursor) {
     final scroll = _pageScroll(_displayedPage);
     if (!scroll.hasClients) return null;
     final position = scroll.position;
@@ -4208,7 +4272,7 @@ class _ReaderPageState extends State<ReaderPage> {
         _followLog(
           '定位链',
           '块=$live 结果=${ok ? "已可见（居中交给跟随）" : "★未落位（将重试）"} stall=$stall '
-          '想要=$_revealWantBlock ${_anchorProbe(live)}',
+              '想要=$_revealWantBlock ${_anchorProbe(live)}',
         );
         if (ok) {
           stall = 0;
@@ -4360,10 +4424,10 @@ class _ReaderPageState extends State<ReaderPage> {
     unawaited(
       controller
           .animateToPage(
-            target,
-            duration: const Duration(milliseconds: 260),
-            curve: Curves.easeOutCubic,
-          )
+        target,
+        duration: const Duration(milliseconds: 260),
+        curve: Curves.easeOutCubic,
+      )
           .catchError((Object _) {
         // 被新的翻页打断是正常的，不是错误
         _pageTurning = false;
@@ -4583,10 +4647,10 @@ class _ReaderPageState extends State<ReaderPage> {
     _followLog(
       '跟随',
       '块=$block 段顶=${paragraphTop.toStringAsFixed(1)} 句位=$_lastSentenceMeasure '
-      '句内偏移=${sentenceInset.toStringAsFixed(1)} '
-      '句心=${sentenceCenter.toStringAsFixed(1)} 视口高=${viewportHeight.toStringAsFixed(0)} '
-      '区间=[${topLimit.toStringAsFixed(0)},${bottomLimit.toStringAsFixed(0)}] '
-      '偏移=${scrollPosition.pixels.toStringAsFixed(1)} max=${scrollPosition.maxScrollExtent.toStringAsFixed(1)}',
+          '句内偏移=${sentenceInset.toStringAsFixed(1)} '
+          '句心=${sentenceCenter.toStringAsFixed(1)} 视口高=${viewportHeight.toStringAsFixed(0)} '
+          '区间=[${topLimit.toStringAsFixed(0)},${bottomLimit.toStringAsFixed(0)}] '
+          '偏移=${scrollPosition.pixels.toStringAsFixed(1)} max=${scrollPosition.maxScrollExtent.toStringAsFixed(1)}',
     );
     if (sentenceCenter >= topLimit && sentenceCenter <= bottomLimit) {
       _followLog('不滚', '句心=${sentenceCenter.toStringAsFixed(1)} 落在舒适区内');
@@ -4595,8 +4659,9 @@ class _ReaderPageState extends State<ReaderPage> {
 
     // 目标：把**句心**放到视口 38% 处（与 PDF 的 alignment 口径一致）。
     // 原来是把「段顶」放到 38%，段比视口高时被读的那句会落到屏幕外。
-    final want = (scrollPosition.pixels + sentenceCenter - viewportHeight * 0.38)
-        .clamp(0.0, scrollPosition.maxScrollExtent);
+    final want =
+        (scrollPosition.pixels + sentenceCenter - viewportHeight * 0.38)
+            .clamp(0.0, scrollPosition.maxScrollExtent);
     if ((want - scrollPosition.pixels).abs() < 2) {
       _followLog('不滚', '目标=${want.toStringAsFixed(1)} 与当前偏移之差<2px');
       return;
@@ -4616,7 +4681,7 @@ class _ReaderPageState extends State<ReaderPage> {
     _followLog(
       '滚动',
       '目标=${want.toStringAsFixed(1)} 起点=${scrollPosition.pixels.toStringAsFixed(1)} '
-      '位移=${(want - scrollPosition.pixels).toStringAsFixed(1)} 对齐=句心38% 动画=200ms',
+          '位移=${(want - scrollPosition.pixels).toStringAsFixed(1)} 对齐=句心38% 动画=200ms',
     );
     _startFollowScroll(scroll, want);
   }
@@ -4687,10 +4752,10 @@ class _ReaderPageState extends State<ReaderPage> {
     unawaited(
       scroll
           .animateTo(
-            target,
-            duration: const Duration(milliseconds: 200),
-            curve: Curves.easeOutCubic,
-          )
+        target,
+        duration: const Duration(milliseconds: 200),
+        curve: Curves.easeOutCubic,
+      )
           .then((_) {
         // 动画正常收尾：回报实际落点（判断"有没有滚到位"）
         if (!mounted || !scroll.hasClients) return;
@@ -4698,7 +4763,8 @@ class _ReaderPageState extends State<ReaderPage> {
         final double error = (landed - target).abs();
         final int elapsed = DateTime.now().difference(startedAt).inMilliseconds;
         final current = _followScrollTarget;
-        final bool superseded = current != null && (current - target).abs() >= 8;
+        final bool superseded =
+            current != null && (current - target).abs() >= 8;
         final FollowScrollOutcome outcome = classifyFollowScroll(
           error: error,
           elapsedMs: elapsed,
@@ -4707,23 +4773,22 @@ class _ReaderPageState extends State<ReaderPage> {
         _followLog(
           '滚动完成',
           '目标=${target.toStringAsFixed(1)} 落点=${landed.toStringAsFixed(1)} '
-          '误差=${error.toStringAsFixed(1)}px 用时=${elapsed}ms '
-          '${switch (outcome) {
+              '误差=${error.toStringAsFixed(1)}px 用时=${elapsed}ms '
+              '${switch (outcome) {
             FollowScrollOutcome.arrived => '已到位',
             FollowScrollOutcome.interrupted => '★被打断（被接管，交给接管者）',
             FollowScrollOutcome.clipped => '★未到位（撞界）',
           }}',
         );
         if (_scrollOwner == 'follow') _scrollOwner = '';
-      })
-          .catchError((Object _) {
+      }).catchError((Object _) {
         // 被新的跟随滚动打断是正常的，不是错误
       }),
     );
     _followLog(
       '滚动发起',
       'API=animateTo 起点=${from.toStringAsFixed(1)} 目标=${target.toStringAsFixed(1)} '
-      '打断上一次=$interrupted',
+          '打断上一次=$interrupted',
     );
   }
 
@@ -4732,15 +4797,55 @@ class _ReaderPageState extends State<ReaderPage> {
   Future<void> _openToc() async {
     final document = _doc;
     if (document == null) return;
+    // ★v1.22.62：目录改成**右侧悬浮卡片**（与 PDF 阅读页目录同一套视觉）
+    //
+    // 做法与 PDF 那边完全一致：
+    // · 底层 showModalBottomSheet 透明 + 不要拖拽条 → 只借它的"模态 + 点击外部关闭"；
+    // · 真正的面板是 Align(bottomRight) 里的一张圆角卡片（宽 340、高 62%）；
+    // · 外层再套 GestureDetector：点卡片以外的空白处关闭（用户明确要求）。
+    //
+    // ⚠️ TocSheet 内部三种模式（原书目录 / 章节 / 页码）与搜索、页码跳转
+    // **全部保留**，这里只换外壳。
+    final size = MediaQuery.sizeOf(context);
     final result = await showModalBottomSheet<(int, int)>(
       context: context,
-      showDragHandle: true,
+      backgroundColor: Colors.transparent,
+      elevation: 0,
       isScrollControlled: true,
-      builder: (sheetContext) => TocSheet(
-        document: document,
-        cursor: _tts.cursor,
-        paragraphsPerPage: StorageService.instance.paragraphsPerPage,
-      ),
+      showDragHandle: false,
+      barrierColor: Colors.black.withOpacity(0.25),
+      builder: (sheetContext) {
+        return GestureDetector(
+          // 点空白处关闭（卡片自身是 HitTestBehavior.opaque，不会传到这里）
+          behavior: HitTestBehavior.opaque,
+          onTap: () => Navigator.of(sheetContext).pop(),
+          child: Align(
+            alignment: Alignment.bottomRight,
+            child: Padding(
+              padding: EdgeInsets.only(
+                right: 10,
+                bottom: MediaQuery.paddingOf(sheetContext).bottom + 10,
+              ),
+              child: Material(
+                color: Theme.of(sheetContext).colorScheme.surfaceContainerHigh,
+                borderRadius: BorderRadius.circular(24),
+                elevation: 6,
+                clipBehavior: Clip.antiAlias,
+                child: SizedBox(
+                  width: 340,
+                  height: size.height * 0.62,
+                  child: TocSheet(
+                    document: document,
+                    cursor: _tts.cursor,
+                    paragraphsPerPage:
+                        StorageService.instance.paragraphsPerPage,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+      },
     );
     if (result == null || !mounted) return;
     // 目录里的下标来自未变的那份文档；仍夹取一次，避免任何越界值进入朗读游标
@@ -4911,7 +5016,8 @@ class _ReaderPageState extends State<ReaderPage> {
 
   /// 按语义重排；判据认为无需重排时返回 null
   List<Chapter>? _reflowedChapters(StructuredDocument document) {
-    final report = ParagraphReflow.analyze(document.chapters, _reflowLinesByPage());
+    final report =
+        ParagraphReflow.analyze(document.chapters, _reflowLinesByPage());
     CrashLog.mark('PDF 自动排版诊断：${report.summary}｜${report.diagnostic}');
     return report.chapters;
   }
@@ -5060,17 +5166,39 @@ class _ReaderPageState extends State<ReaderPage> {
           '第 ${chapterIndex + 1} 章 第 $page/$totalPages 页 · 第 ${safeParagraph + 1} 段';
     }
 
-    if (_controlCollapsed) return _collapsedControls(theme, playing, position);
+    // 收起态由正文区域的 Stack 单独渲染（悬浮、不占正文高度）
+    //
+    // ★v1.22.62 方案 B：展开态也做成**底部悬浮卡片**（用户 2026-10-27 选定）
+    // ```
+    // 左右各留 12dp、贴底留 12dp、圆角 24、带阴影
+    // ```
+    // 它不是贴着屏幕边的通栏，而是明确"浮"在正文之上的一层，
+    // 与 PDF 的悬浮语言一致。代价是底部一小块正文被盖住（用户已知并接受）。
     return Material(
       key: ReaderPage.controlCenterKey,
       color: scheme.surfaceContainerHigh,
+      elevation: 6,
+      borderRadius: BorderRadius.circular(24),
+      clipBehavior: Clip.antiAlias,
       child: SafeArea(
         top: false,
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(8, 4, 8, 4),
+          padding: const EdgeInsets.fromLTRB(8, 2, 8, 4),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: <Widget>[
+              // 拖拽条：与目录卡、PDF 抽屉同一套"可收起浮层"的暗示
+              Padding(
+                padding: const EdgeInsets.only(bottom: 2),
+                child: Container(
+                  width: 40,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: scheme.onSurfaceVariant.withOpacity(0.35),
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+              ),
               // 翻页行：分页版面下按「页」翻，与左右滑动是同一套（都走 _turnPageTo）
               if (!_paging.isEmpty)
                 Row(
@@ -5135,9 +5263,7 @@ class _ReaderPageState extends State<ReaderPage> {
                       key: ReaderPage.autoFormatKey,
                       // 一个按钮两种状态：点亮 = 排版已生效，再点恢复原排版。
                       // 选择会落盘，退出重进保持。
-                      tooltip: _autoFormatted
-                          ? '恢复原排版'
-                          : '自动排版：把被折行切断的句子接回整段',
+                      tooltip: _autoFormatted ? '恢复原排版' : '自动排版：把被折行切断的句子接回整段',
                       isSelected: _autoFormatted,
                       onPressed: _toggleAutoFormat,
                       icon: const Icon(Icons.auto_fix_high),
@@ -5155,29 +5281,8 @@ class _ReaderPageState extends State<ReaderPage> {
                   ),
                 ],
               ),
-              Row(
-                children: <Widget>[
-                  const Icon(Icons.speed, size: 20),
-                  Expanded(
-                    child: Slider(
-                      value: _tts.rate,
-                      min: 0.5,
-                      max: 2.0,
-                      divisions: 15,
-                      label: '${(_tts.rate * 100).round()}%',
-                      onChanged: _tts.setRate,
-                    ),
-                  ),
-                  SizedBox(
-                    width: 48,
-                    child: Text(
-                      '${(_tts.rate * 100).round()}%',
-                      textAlign: TextAlign.end,
-                      style: theme.textTheme.labelMedium,
-                    ),
-                  ),
-                ],
-              ),
+              // 语速条已删除（用户 2026-10-27 明确要求）。
+              // 语速仍可在「设置 → 朗读」里调；面板里不再重复放一个滑条。
               _localEngineBar(theme),
               // 实时进度：与高亮框用**同一个游标**算出来，所以「框在哪」与
               // 「进度显示到哪」永远一致（以前只显示页码/段号，看不出进度对齐没有）
@@ -5239,46 +5344,80 @@ class _ReaderPageState extends State<ReaderPage> {
     );
   }
 
-  /// 折叠态控制中心：只留「播放/暂停 + 当前位置 + 展开」
+  /// 折叠态控制中心：**与 PDF 阅读页同一套悬浮收起样式**（v1.22.62）
   ///
-  /// 朗读时用户主要看正文，控制中心占掉屏幕下方一大块很碍事；
-  /// 折起来仍然能暂停 / 继续，位置信息也留着。
-  Widget _collapsedControls(ThemeData theme, bool playing, String position) {
-    final scheme = theme.colorScheme;
-    return Material(
-      key: ReaderPage.collapsedControlKey,
-      color: scheme.surfaceContainerHigh,
-      child: SafeArea(
-        top: false,
-        child: SizedBox(
-          height: 46,
-          child: Row(
-            children: <Widget>[
-              const SizedBox(width: 6),
-              IconButton.filledTonal(
-                tooltip: playing ? '暂停' : '播放',
-                onPressed: _toggle,
-                icon: Icon(playing ? Icons.pause : Icons.play_arrow),
-                visualDensity: VisualDensity.compact,
-              ),
-              const SizedBox(width: 4),
-              Expanded(
-                child: Text(
-                  '${_tts.documentTitle.isEmpty ? widget.document.title : _tts.documentTitle}'
-                  ' · $position',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: theme.textTheme.labelMedium,
+  /// ## 为什么改（用户 2026-10-27）
+  /// 「文字档（EPUB）的收起要和 PDF 一致」。
+  /// 原来是一条 46dp 的通栏迷你条（暂停 + 书名·位置 + 展开），
+  /// 现在改成与 `PdfControlBar` 收起态**完全一致**的形态：
+  ///
+  /// ```
+  ///        [ ⌃ ]  [ ⏸ ]
+  ///         展开    暂停
+  /// ```
+  /// 两枚悬浮键贴右下角，**不占正文高度**（由 build 里的 Stack 承载）。
+  ///
+  /// ## 为什么不再显示书名/位置
+  /// PDF 那边的收起态用户明确要求「精简只剩控件，不需文件名」；
+  /// 这里与之对齐。位置信息在展开面板里仍有（`_progressRow`）。
+  ///
+  /// ## Key 保持不变
+  /// `collapsedControlKey` 挂根节点、`expandControlKey` 挂箭头 ——
+  /// `reader_ui_features_test` / `reader_read_mode_test` 依赖这两个 Key。
+  Widget _collapsedControls() {
+    final scheme = Theme.of(context).colorScheme;
+    final playing = _tts.playing;
+    return Align(
+      alignment: Alignment.bottomRight,
+      child: Padding(
+        // 与 PDF 一致：避开右下角「回到朗读位置」按钮所在的高度
+        padding: const EdgeInsets.only(right: 16, bottom: 88),
+        child: Row(
+          key: ReaderPage.collapsedControlKey,
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            // 展开箭头（tonal）
+            Material(
+              color: scheme.secondaryContainer,
+              shape: const CircleBorder(),
+              child: InkWell(
+                key: ReaderPage.expandControlKey,
+                customBorder: const CircleBorder(),
+                onTap: () => setState(() => _controlCollapsed = false),
+                child: SizedBox(
+                  width: 40,
+                  height: 40,
+                  child: Icon(
+                    Icons.keyboard_arrow_up,
+                    size: 20,
+                    color: scheme.onSecondaryContainer,
+                    semanticLabel: '展开控制中心',
+                  ),
                 ),
               ),
-              IconButton(
-                key: ReaderPage.expandControlKey,
-                tooltip: '展开控制中心',
-                onPressed: () => setState(() => _controlCollapsed = false),
-                icon: const Icon(Icons.keyboard_arrow_up),
+            ),
+            const SizedBox(width: 10),
+            // 主键：暂停 / 继续（filled）
+            Material(
+              color: scheme.primary,
+              shape: const CircleBorder(),
+              elevation: 3,
+              child: InkWell(
+                customBorder: const CircleBorder(),
+                onTap: _toggle,
+                child: SizedBox(
+                  width: 56,
+                  height: 56,
+                  child: Icon(
+                    playing ? Icons.pause : Icons.play_arrow,
+                    size: 28,
+                    color: scheme.onPrimary,
+                    semanticLabel: playing ? '暂停' : '播放',
+                  ),
+                ),
               ),
-            ],
-          ),
+            ),
+          ],
         ),
       ),
     );

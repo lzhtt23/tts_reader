@@ -12,12 +12,12 @@ import 'pages/source_import_confirm_page.dart';
 import 'pages/speak_now_page.dart';
 import 'services/c2s.dart';
 import 'services/crash_log.dart';
+import 'services/device_info.dart';
 import 'services/deep_link_intake.dart';
 import 'services/document_service.dart';
 import 'services/download_watcher.dart';
 import 'services/gbk_decoder.dart';
 import 'services/legado_source_store.dart';
-import 'services/media_key_channel.dart';
 import 'services/rss_importer.dart';
 import 'services/rss_store.dart';
 import 'services/source_importer.dart';
@@ -84,10 +84,24 @@ Future<void> _initDownloader() async {
 Future<void> _initDeferredServices() async {
   // 后台朗读 + 通知栏控制：注册前台服务与媒体通知
   await TtsAudioHandler.init();
-  // 耳机 / 平板媒体键兜底：平板有些 ROM 不走 MediaSession，
-  // 按键改走 ACTION_MEDIA_BUTTON 广播（TtsMediaButtonReceiver）→ 原生通道 → 这里。
-  // 必须在 TtsAudioHandler.init() 之后装：它要订阅 playbackState 判断"是否在朗读"。
-  MediaKeyChannel.attach();
+  // ★v1.22.62：**不再在应用启动时预建静音轨**（用户 2026-10-27 决定）。
+  //
+  // ## 三个时机都试过了，最终选"开始朗读时"
+  // ```
+  // 最初：开始朗读时建   → 瞬态紧挨着第一句，被语音起始盖住 ← 回到这里
+  // 中途：打开文档时建   → 用户明确听到"啪"，不可接受
+  // 上一版：应用启动时建 → 环境安静，"啪"反而更突兀，用户要求挪回朗读时
+  // ```
+  // 关键认识：这条轨**播的是静音**，"啪"来自音频通路上电，与数据无关；
+  // 所以无法消除，只能挑一个**最容易被掩盖**的时刻。
+  // 开始朗读时最合适 —— 紧跟着就是语音，瞬态被自然掩盖。
+  //
+  // 媒体键不受影响：第一次 `_pushState()`（朗读开始时）就会建轨并接管路由。
+  // 厂商标识预热：媒体键的 ColorOS 兼容分支要同步读它（§4.119）
+  await DeviceInfo.warmUp();
+  // （v1.22.57 删掉了这里的 MediaKeyChannel.attach()：ACTION_MEDIA_BUTTON
+  //  广播兜底路径从未收到过按键，它声明的第二个接收器反而把会话的
+  //  mediaButtonReceiver 弄成 null —— 见交接文档 §4.116）
   // 音频属性 + 打断监听：**必须在这里单独做一次**，不能只靠 init() 里那句 ——
   // 桌面 / 测试环境里 audio_service 会初始化失败，那时也要按当前设置
   // （是否允许其它媒体打断）把音频会话配好，否则开关形同虚设。

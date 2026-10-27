@@ -266,6 +266,7 @@ class UserScrollStopTracker {
 }
 
 class PdfReadingPageState extends State<PdfReadingPage>
+    with WidgetsBindingObserver
     implements PdfReadSessionListener {
   final PdfReadSession _session = PdfReadSession.instance;
 
@@ -459,9 +460,23 @@ class PdfReadingPageState extends State<PdfReadingPage>
     return true;
   }
 
+  /// 打开骨架屏的延迟定时器（v1.22.62）
+  ///
+  /// 缓存命中时打开只要几毫秒，立刻显示骨架屏会**闪一下**（比不显示更难看）。
+  /// 延迟 150ms 再显示：慢的时候用户仍能立刻看到"在干活"，快的时候完全不闪。
+  Timer? _openSplashTimer;
+
+  /// 延迟到期后才允许显示骨架屏
+  bool _showOpenSplash = false;
+
   @override
   void initState() {
     super.initState();
+    // 150ms 后还没准备好 → 亮出骨架屏（快的话永远不亮，不闪）
+    _openSplashTimer = Timer(const Duration(milliseconds: 150), () {
+      if (!mounted || _document != null) return;
+      setState(() => _showOpenSplash = true);
+    });
     _turn = PdfPageTurnController(pageCount: 0);
     _turn.jumpTo = _jumpToPage;
     _turn.animateTo = _animateToPage;
@@ -476,16 +491,65 @@ class PdfReadingPageState extends State<PdfReadingPage>
     // 就会**永远显示成没有文字层** —— 于是点句没反应
     //（实测：会话缓存里明明有 `[0,1,2]` 三层，组件那侧还是「无层」）。
     _session.addListener(_onSessionChanged);
+    // ★v1.22.62：监听 App 生命周期 —— 从后台/息屏回来要重新对齐朗读位置
+    WidgetsBinding.instance.addObserver(this);
     unawaited(_open());
+  }
+
+  /// 构造控制栏（收起=悬浮键 / 展开=底部抽屉，二选一取决于 [_controlCollapsed]）
+  ///
+  /// 抽成方法是为了让**收起态与展开态共用同一套参数**（同一个 widget 的两种形态），
+  /// 复制一遍就会分叉。两种形态都画在 body 的 Stack 里，不占布局高度。
+  Widget _buildControlBar(PdfReadSession session) {
+    // 用 ValueListenableBuilder 包一层：设置里切换形态时**立刻生效**，
+    // 不用退出重进阅读页。
+    return ValueListenableBuilder<bool>(
+      valueListenable: StorageService.instance.pdfRadialControl,
+      builder: (BuildContext context, bool radial, Widget? _) => PdfControlBar(
+          collapsed: _controlCollapsed,
+          // 展开形态：默认胶囊，设置里可切成扇形（v1.22.62）
+          style: radial ? PdfControlStyle.radial : PdfControlStyle.capsule,
+          // 正在出声 = "在播且没暂停"（与通知栏 `playing && !paused` 同一口径）
+          playing: session.isPlaying && !session.isPaused,
+          paused: session.isPaused,
+          onToggleCollapsed: () {
+            setState(() => _controlCollapsed = !_controlCollapsed);
+            // ★展开/收起改变了**可视高度** + **生效档位**（0.35 ↔ 0.25）→
+            // 必须立刻按新档位重新对齐一次，否则句子会被控制条挤到边上
+            // （用户真机反馈："一展开就挡住"）。
+            //
+            // `forceCenter: true` —— 视口刚变，必须重算，**无视死区**；
+            // `force: false`（默认）—— **仍尊重"用户正在滑动就让他"**：
+            // 用户正滑着的时候展开控制条，不该把他拽回去。
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (!mounted) return;
+              final ref = _session.current;
+              if (ref == null) return;
+              CrashLog.mark('AF[档位切换] 控制条'
+                  '${_controlCollapsed ? "收起" : "展开"} '
+                  '→ 档位=$effectivePdfSentenceAlignment 重新对齐 '
+                  '（ref=${ref.pageIndex + 1}/${ref.sentenceIndex}）');
+              centerOnSentence(ref, forceCenter: true);
+            });
+          },
+          onPlayPause: () => unawaited(_togglePlayPause()),
+          onPrevious: session.skipSentenceBackward,
+          onNext: session.skipSentenceForward,
+          onStop: () => unawaited(_stopAndCollapse()),
+          onOpenToc: () => unawaited(_openToc()),
+      ),
+    );
   }
 
   @override
   void dispose() {
     // ⚠️ 只 detach，**不 stop** —— 退出阅读页朗读继续（HANDOFF §4.60）
+    WidgetsBinding.instance.removeObserver(this);
     _session.removeListener(_onSessionChanged);
     _session.detach(this);
     _scrollIdle?.cancel();
     _settleDebounce?.cancel();
+    _openSplashTimer?.cancel();
     // 设备用例的全局引用要跟着本页一起清掉（避免指向已 dispose 的闸门）
     if (identical(PdfPageTurnController.debugActiveForTest, _turn)) {
       PdfPageTurnController.debugActiveForTest = null;
@@ -493,12 +557,62 @@ class PdfReadingPageState extends State<PdfReadingPage>
     _turn.dispose();
     _scroll.dispose();
     _tocPageInput.dispose(); // 目录里的页码输入框（v1.21.56 新增）
+    _tocScroll.dispose();
     super.dispose();
   }
 
   /// 会话状态变了（文本层加载完成 / 播放状态变化）→ 重建
   void _onSessionChanged() {
     if (mounted) setState(() {});
+  }
+
+  // ─────────── 从后台/息屏回来：重新对齐朗读位置（v1.22.62） ───────────
+  //
+  // ## 治什么（用户 2026-10-26 报）
+  // > 「在息屏或后台朗读一段时间后，再返回朗读页面就卡死了，
+  // >   退到文档库重进才正常」
+  //
+  // ## 为什么会卡死
+  // 后台期间**这个页面收不到任何刷新**：Flutter 的 Ticker/帧回调在后台被暂停，
+  // 而朗读是在 TTS 引擎那边继续跑的（cursor 已经往前走了很多页）。
+  // 回到前台时：
+  //   · `_pageKeys` 里渲染的还是离开时的那些页
+  //   · `_pageExtents` 是离开时的旧值
+  //   · 视图位置停在离开时的地方
+  // 而朗读位置已经跑到几十页之外 → 收敛链要在"完全对不上的坐标"上找目标页，
+  // 找不到就一轮轮重试，看起来就是卡死。退回文档库重进之所以正常，
+  // 是因为重建了页面、所有状态从零开始。
+  //
+  // ## 修法
+  // 回到前台时**主动重新对齐一次**：把页高表里"离开时那批页"之外的部分
+  // 视为未知（它们可能已经因为布局变化而失效），然后强制滚到当前朗读句。
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+    if (state != AppLifecycleState.resumed) return;
+    if (!mounted) return;
+    final ref = _session.current;
+    if (ref == null) return;
+    // 后台可能很久：让"用户停手"的自动接管限制立即过期，
+    // 否则 `AF[等待接管]` 会把这次恢复定位压掉（真机日志里出现过）。
+    _lastUserScrollEndAt = null;
+    // ⚠️ 关键：**清掉旧的页高表**再对齐。
+    //
+    // 后台期间布局可能变了（旋转/分屏/字号/系统栏），旧页高不再代表当前布局；
+    // 拿旧表算出来的偏移会把视图带到错误位置 —— 那正是"卡死"的形态。
+    // 清空后 `_measured` 全为 0，估算从"实测均值"重新起步，
+    // 而重新对齐本身会让 ListView 把目标页附近真正布局出来、立刻回填真值。
+    for (var i = 0; i < _pageExtents.length; i++) {
+      _pageExtents[i] = 0;
+    }
+    CrashLog.mark('AF[回前台] ref=${ref.pageIndex + 1}/${ref.sentenceIndex} '
+        '视口页=${viewportPageForJudgement(_scroll.hasClients ? _scroll.position.pixels : 0) ?? "?"} '
+        '→ 清空页高表并强制重新对齐');
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      // `forceCenter: true`：无视死区，因为后台期间位置差得可能很远
+      centerOnSentence(ref, force: true, forceCenter: true);
+    });
   }
 
   Future<void> _open() async {
@@ -516,7 +630,9 @@ class PdfReadingPageState extends State<PdfReadingPage>
         return;
       }
       final pageCount = doc.pages.length;
+      _openSplashTimer?.cancel();
       setState(() {
+        _showOpenSplash = false;
         _document = doc;
         _pageExtents
           ..clear()
@@ -935,13 +1051,23 @@ class PdfReadingPageState extends State<PdfReadingPage>
       final viewport = RenderAbstractViewport.of(box);
       return viewport.getOffsetToReveal(box, 0).offset;
     }
-    // 估算：把前面已量到的页高加起来
+    // 估算：前面已量到的用实测，没量到的用估算顶替（v1.22.62）
+    //
+    // ## 为什么不再 `return null`
+    // 原来只要**任何一页**没量到就直接放弃。真机（2026-10-26 19:29，286 页 PDF）
+    // 里 112 页中有 106 页没量到 → 这个函数几乎永远返回 null →
+    // 上层完全拿不到"这一页在哪"的任何线索，只能靠 `estimateOffsetToPage`
+    // 反复猜，猜出来的值还总落在两页之间的空隙里 → 目标页永远建不出来。
+    //
+    // 现在与 `estimateOffsetToPage` 统一口径：**空缺用估算顶替、不中断**。
+    // 两者本来就该是同一个算法（一个算页顶、一个算页号），
+    // 分开写正是历史偏差的来源。
     if (_pageExtents.isEmpty || pageIndex >= _pageExtents.length) return null;
+    final double est = _estimatedPageExtent() ?? 0;
     var sum = 0.0;
     for (var i = 0; i < pageIndex; i++) {
       final extent = _pageExtents[i];
-      if (extent <= 0) return null; // 有一段没量到，估算不可靠
-      sum += extent;
+      sum += extent > 0 ? extent : est;
     }
     return sum;
   }
@@ -1140,15 +1266,16 @@ class PdfReadingPageState extends State<PdfReadingPage>
   /// 绝大多数情况下第 1 页已经渲染过、有真实高度，用它当 fallback 准得多。
   int? viewportPageForJudgement(double offset) {
     if (_pageExtents.isEmpty) return null;
-    // fallback 优先用"已量到的第一个真实页高"；一个都没量到才退回估算
-    double fallback = 0;
-    for (final e in _pageExtents) {
-      if (e > 0) {
-        fallback = e;
-        break;
-      }
-    }
-    if (fallback <= 0) fallback = _estimatedPageExtent() ?? 0;
+    // ★★ v1.22.62：fallback **必须与 `_estimatedPageExtent()` 同源**
+    //
+    // 原来这里取"第一个实测页高"，而 `_estimatedPageExtent()` 取"全部实测均值" ——
+    // 两套口径。后果：`AF[居中]` 打印的"视口页"和 `_jump…` 用的偏移
+    // **基于不同的页高**，日志里就出现自相矛盾的数字（用户报"只有这本书定位不到"，
+    // 而那本书 286 页尺寸虽一致但渲染高度有 ±1px 抖动，两者差距被放大）。
+    //
+    // 现在统一走 `_estimatedPageExtent()`：它内部已是"有实测用均值、没有才按结构估"，
+    // 页号反推与偏移计算从此用同一个数。
+    final double fallback = _estimatedPageExtent() ?? 0;
     if (fallback <= 0) return null;
     // ★以**屏幕中心**为准（与"朗读句居中"同一口径）
     final double half =
@@ -1265,12 +1392,60 @@ class PdfReadingPageState extends State<PdfReadingPage>
   double? _estimatedPageExtent() {
     final doc = _document;
     if (doc == null || doc.pages.isEmpty) return null;
+    if (!mounted) return null;
+    // ★★★ v1.22.62：**只要有实测页，就用实测均值**，公式只当"一页都没量到"的起步
+    //
+    // ## 为什么必须这样（真机 2026-10-26 21:40 实测，用户那本 286 页 PDF）
+    //
+    // ```
+    // AF[页高实测] 第114页 页面高=488.3 理论页高=488.3 差=0.0
+    // AF[居中]     标定 refPage=113 页顶偏移=58792   ← 真实
+    // AF[居中逼近] 目标页=113        逼近偏移=58380   ← 估算
+    // ```
+    // 58792 ÷ 112 页 = **524.93px/页**，而页面本身只有 488.3
+    // → 每页真实占用比"页面高"多 **36.6px**（外层 Padding 16 + 页码行 20.6）。
+    //
+    // ⚠️ 关键教训：`PdfPageLayer` 上报的、和列表滚动使用的，**不是同一个量**。
+    // 前者是"页面"高度，后者是"页块"（页面 + Padding + 页码行）高度。
+    // 页数少的书累计误差不到一页、看不出来；页数一多就整页偏出去。
+    // 现在记录时已补上附加量（见 `onExtentChanged`），这里的均值
+    // 因此是**页块高**，与滚动口径一致。
+    //
+    // ## 为什么实测均值一定优于公式
+    // 实测值是 Flutter 真正布局出来的高度；公式只能按宽高比估一个"页面高"，
+    // 还要另猜 Padding 与页码行。既然已经有真值，没有理由继续猜。
+    var mSum = 0.0;
+    var mCnt = 0;
+    for (final e in _pageExtents) {
+      if (e > 0) {
+        mSum += e;
+        mCnt++;
+      }
+    }
+    if (mCnt > 0 && mSum > 0) return mSum / mCnt;
+
+    // ── 一页都还没量到：按页面尺寸起步（常数用实测出来的 23.2，不是 28）──
     final first = doc.pages.first;
     if (first.width <= 0 || first.height <= 0) return null;
-    if (!mounted) return null;
     final usable = MediaQuery.sizeOf(context).width - 16; // 左右各 8px 内边距
     if (usable <= 0) return null;
-    return usable / (first.width / first.height) + 28.0; // + 上下内边距与页码行
+    // ★★ 常数**按结构算**，不写死一个"实测反推"的数字
+    //
+    // 用户 2026-10-26 点破的关键：「平板的结果留给平板用」——
+    // 手机 360dp、平板 375dp，同一常数在两台设备上必然只有一个是对的。
+    // 任何"我在某台机器上量出的 23.2 / 44.5"都只对那台机器成立。
+    //
+    // 所以这里只保留**与设备无关的结构量**：
+    //   · 上下 Padding：`_pageItem` 里写字面量 8+8，这是代码决定的，不是设备决定的
+    //   · 页码行：`textTheme.labelSmall` 一行 + top:4 —— 用 `MediaQuery` 的字号
+    //     比例估一个保守值，且**只用于"一页都还没量到"的那一瞬间**
+    //
+    // 真正的精度来自实测：只要量到任意一页，上面那段 `mCnt > 0` 就直接用实测均值，
+    // 这个兜底只在"打开后第一帧、还没有任何页布局完成"时生效（约几十毫秒）。
+    final textScaler = MediaQuery.textScalerOf(context).scale(11.0);
+    // 页码行 ≈ top4 + 一行 labelSmall(约 11 逻辑像素 × 用户字号缩放) + 行距 2
+    final pageLabelRow = 4.0 + textScaler + 2.0;
+    return usable / (first.width / first.height) + 16.0 + pageLabelRow;
   }
 
   /// 本帧内正在收敛的目标页（同帧重复进入去重，见 [_revealToPageIndex]）
@@ -2086,6 +2261,7 @@ class PdfReadingPageState extends State<PdfReadingPage>
     if (pageCount == 0) return;
     final entries = _outline;
     _tocPageInput.text = '${(_session.current?.pageIndex ?? 0) + 1}';
+    _tocCenteredOnce = false; // 每次打开都重新居中到当前章
 
     /// 当前所在的条目下标（-1 = 无可标记项）
     ///
@@ -2098,15 +2274,42 @@ class PdfReadingPageState extends State<PdfReadingPage>
 
     await showModalBottomSheet<void>(
       context: context,
-      showDragHandle: true,
+      // ★v1.22.62：目录改成**右侧浮起的 MD3 卡片**（不再通栏贴底），
+      // 与新的悬浮控制栏同一套视觉语言（用户 2026-10-27 要求"适配目录展开样式"）。
+      //
+      // 仍然用 bottom sheet 而不是纯 overlay：它自带**返回键关闭 / 点外部关闭 /
+      // 焦点管理**，这些行为重写容易漏；只用透明底 + 卡片外形就能得到"浮动"观感。
+      backgroundColor: Colors.transparent,
+      elevation: 0,
+      showDragHandle: false,
       isScrollControlled: true,
       builder: (sheetContext) {
         final theme = Theme.of(sheetContext);
         final scheme = theme.colorScheme;
-        return SizedBox(
-          // 与文字档目录同一个高度比例
-          height: MediaQuery.sizeOf(sheetContext).height * 0.75,
-          child: Column(
+        // ★v1.22.62：**点空白处收起**（用户 2026-10-27 要求）。
+        //
+        // 为什么原来点不动：卡片外层是 `Align`，它会撑满整个弹层区域，
+        // 于是"空白"其实还在弹层里，蒙层永远收不到点击。现在用一层
+        // `GestureDetector` 明确接管空白区，卡片自己再吸收点击避免误关。
+        return GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: () => Navigator.of(sheetContext).pop(),
+          child: Align(
+          alignment: Alignment.bottomRight,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(10, 0, 10, 10),
+            child: GestureDetector(
+              onTap: () {}, // 吃掉卡片内的空白点击，不让它冒泡去关面板
+              child: Material(
+              color: scheme.surfaceContainerHigh,
+              elevation: 6,
+              clipBehavior: Clip.antiAlias,
+              borderRadius: BorderRadius.circular(24),
+              child: SizedBox(
+                // 卡片比通栏矮：上面还看得到正文
+                width: 340,
+                height: MediaQuery.sizeOf(sheetContext).height * 0.62,
+                child: Column(
             children: <Widget>[
               Padding(
                 padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
@@ -2156,7 +2359,29 @@ class PdfReadingPageState extends State<PdfReadingPage>
                   builder: (context, _) {
                     final currentPage = _session.current?.pageIndex ?? 0;
                     final activeIndex = currentIndexOf(currentPage);
+                    // ★v1.22.62：**打开时把当前章滚到中间**（用户 2026-10-27 要求
+                    // "方便翻找"）。
+                    //
+                    // 用 `itemExtent` 固定行高：行高统一才能精确算出"居中"的偏移；
+                    // 原来行高随标题行数变化，没法可靠居中也算不准。
+                    // 居中只在**首次布局后**做一次（`_tocCentered` 防重复，
+                    // 否则朗读推进导致重建时会把用户正在翻的列表拽回去）。
+                    if (!_tocCenteredOnce) {
+                      _tocCenteredOnce = true;
+                      WidgetsBinding.instance.addPostFrameCallback((_) {
+                        if (!_tocScroll.hasClients) return;
+                        final ScrollPosition pos = _tocScroll.position;
+                        final double target = activeIndex * _kTocRowHeight -
+                            pos.viewportDimension / 2 +
+                            _kTocRowHeight / 2;
+                        _tocScroll.jumpTo(
+                          target.clamp(0.0, pos.maxScrollExtent),
+                        );
+                      });
+                    }
                     return ListView.builder(
+                      controller: _tocScroll,
+                      itemExtent: _kTocRowHeight,
                       itemCount: entries.isEmpty ? pageCount : entries.length,
                       itemBuilder: (context, index) {
                         // 没有书签：退回「第 N 页」列表（章号 == 页号）
@@ -2182,7 +2407,7 @@ class PdfReadingPageState extends State<PdfReadingPage>
                             leading: Text('${pageIndex + 1}'),
                             title: Text(
                               label,
-                              maxLines: 2,
+                              maxLines: 1,
                               overflow: TextOverflow.ellipsis,
                               style: selected
                                   ? TextStyle(
@@ -2213,15 +2438,29 @@ class PdfReadingPageState extends State<PdfReadingPage>
                   },
                 ),
               ),
-            ],
+                ],
+              ),
+            ),
           ),
-        );
+        ),
+      ),
+      ),
+      );
       },
     );
   }
 
   /// 目录里的「跳转到第几页」输入框（与文字档目录同款）
   final TextEditingController _tocPageInput = TextEditingController();
+
+  /// 目录列表滚动控制器（v1.22.62：打开时把当前章居中）
+  final ScrollController _tocScroll = ScrollController();
+
+  /// 本次打开是否已经做过"当前章居中"（只做一次，避免朗读推进时把列表拽回）
+  bool _tocCenteredOnce = false;
+
+  /// 目录行高（固定值：行高统一才能精确算出居中偏移）
+  static const double _kTocRowHeight = 62;
 
   /// 从目录的输入框跳页：**只移动视图，不激活朗读**（与点条目同一语义）
   void _jumpFromToc(BuildContext sheetContext) {
@@ -2298,9 +2537,39 @@ class PdfReadingPageState extends State<PdfReadingPage>
         // floatingActionButton），两个都显示时会重叠。
         alignment: Alignment.bottomLeft,
         children: <Widget>[
-          _error != null
-              ? _errorView()
-              : (doc == null ? _loadingView() : _pagesView(doc)),
+          // ★v1.22.62：**加载 → 内容 用淡入 + 轻微放大过渡**，不再"啪"地切换
+          //
+          // 用户诉求（2026-10-26）：「进入文档的加载替换成过渡动画，让加载不突兀」。
+          //
+          // 为什么要 `KeyedSubtree` 给不同状态不同 key：`AnimatedSwitcher` 靠 key
+          // 判断"换了个人"，不加 key 时它认为是同一个 widget 只改了属性，
+          // 于是**不会**做过渡（这是 AnimatedSwitcher 最常见的失效原因）。
+          AnimatedSwitcher(
+            duration: const Duration(milliseconds: 260),
+            switchInCurve: Curves.easeOutCubic,
+            switchOutCurve: Curves.easeIn,
+            transitionBuilder: (Widget child, Animation<double> anim) {
+              return FadeTransition(
+                opacity: anim,
+                child: ScaleTransition(
+                  // 0.985 → 1.0：极轻微，几乎察觉不到"放大"，
+                  // 但比纯淡入更有"内容浮上来"的实感
+                  scale: Tween<double>(begin: 0.985, end: 1.0).animate(anim),
+                  child: child,
+                ),
+              );
+            },
+            child: _error != null
+                ? KeyedSubtree(key: const ValueKey<String>('pdf-error'),
+                    child: _errorView())
+                : (doc == null
+                    ? KeyedSubtree(key: const ValueKey<String>('pdf-loading'),
+                        child: _showOpenSplash
+                            ? _loadingView()
+                            : const SizedBox.shrink())
+                    : KeyedSubtree(key: const ValueKey<String>('pdf-content'),
+                        child: _pagesView(doc))),
+          ),
           // B-P5：PDF **原版式**页原先没有朗读诊断指示灯（只有 ReaderPage 有），
           // 这里挂上同一个实现；关闭时是零尺寸的 SizedBox，不占布局。
           // heroTag 与阅读页不同：两个页面都挂 FAB 时同名 Hero 会在路由切换时撞车。
@@ -2317,6 +2586,12 @@ class PdfReadingPageState extends State<PdfReadingPage>
                   )
                 : const SizedBox.shrink(),
           ),
+          // 控制栏：**收起/展开都在这一层悬浮**（v1.22.62）
+          //
+          // 不再区分"收起放 Stack、展开放 bottomNavigationBar"：
+          // 后者会让 `Align` 撑满底部槽位、盖住全部正文（用户 2026-10-27 报）。
+          // 放 Stack 里两种形态都只占自己那块，正文照常可见可点。
+          if (session.isActive) _buildControlBar(session),
         ],
       ),
       floatingActionButton: _backToReading
@@ -2327,62 +2602,54 @@ class PdfReadingPageState extends State<PdfReadingPage>
               label: const Text('回到朗读位置'),
             )
           : null,
-      // 控制栏：PDF 会话活着才显示（双源分派在 reading_control_bar 那边）
-      bottomNavigationBar: session.isActive
-          ? PdfControlBar(
-              collapsed: _controlCollapsed,
-              title: widget.title,
-              pageLabel: _pageLabel(),
-              // 正在出声 = "在播且没暂停"（与通知栏 `playing && !paused` 同一口径）
-              playing: session.isPlaying && !session.isPaused,
-              paused: session.isPaused,
-              rate: TtsManager.instance.rate,
-              onToggleCollapsed: () {
-                setState(() => _controlCollapsed = !_controlCollapsed);
-                // ★展开/收起改变了**可视高度** + **生效档位**（0.35 ↔ 0.25）→
-                // 必须立刻按新档位重新对齐一次，否则句子会被控制条挤到边上
-                // （用户真机反馈："一展开就挡住"）。
-                //
-                // `forceCenter: true` —— 视口刚变，必须重算，**无视死区**；
-                // `force: false`（默认）—— **仍尊重"用户正在滑动就让他"**：
-                // 用户正滑着的时候展开控制条，不该把他拽回去。
-                WidgetsBinding.instance.addPostFrameCallback((_) {
-                  if (!mounted) return;
-                  final ref = _session.current;
-                  if (ref == null) return;
-                  CrashLog.mark('AF[档位切换] 控制条'
-                      '${_controlCollapsed ? "收起" : "展开"} '
-                      '→ 档位=$effectivePdfSentenceAlignment 重新对齐 '
-                      '（ref=${ref.pageIndex + 1}/${ref.sentenceIndex}）');
-                  centerOnSentence(ref, forceCenter: true);
-                });
-              },
-              onPlayPause: () => unawaited(_togglePlayPause()),
-              onPrevious: session.skipSentenceBackward,
-              onNext: session.skipSentenceForward,
-              onStop: () => unawaited(_stopAndCollapse()),
-              onRateChanged: (value) => unawaited(_setRate(value)),
-              onOpenToc: () => unawaited(_openToc()),
-            )
-          : null,
+      // ⚠️ v1.22.62：控制栏**不再放 bottomNavigationBar**。
+      //
+      // 用户反馈（2026-10-27）：「控制栏展开会挡住所有正文」。
+      // 原因：`bottomNavigationBar` 从 Scaffold 拿到的约束**高度是有界的**，
+      // 而控制栏根节点是 `Align` —— `Align` 在有界约束下会**撑满可用高度**，
+      // 于是整个底部槽位变成全屏大小，正文被完全盖住。
+      //
+      // 现在两种形态**都画在 body 的 Stack 里**（见上面的 `_buildControlBar` 调用）：
+      // `Align` 只在自己的子树里定位，不占布局高度，也不会撑满屏幕；
+      // 它的命中测试只覆盖按钮所在区域，正文照样可以点、可以滚。
+      bottomNavigationBar: null,
     );
   }
 
-  String _pageLabel() {
-    final ref = _session.current;
-    final total = _document?.pages.length ?? 0;
-    if (ref == null) return total == 0 ? '' : '第 1/$total 页';
-    return '第 ${ref.pageIndex + 1}/$total 页';
-  }
-
-  Future<void> _setRate(double value) async {
-    await TtsManager.instance.setRate(value);
-    if (mounted) setState(() {});
-  }
-
-  Widget _loadingView() => const Center(
+  Widget _loadingView() => Center(
         key: PdfReadingPage.loadingKey,
-        child: CircularProgressIndicator(),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            // 与真实页同比例的占位块（A4 竖版比例，不带页码行）
+            Container(
+              width: 168,
+              height: 168 * (595.4 / 419.5),
+              decoration: BoxDecoration(
+                color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                borderRadius: BorderRadius.circular(6),
+              ),
+              child: Icon(
+                Icons.picture_as_pdf_outlined,
+                size: 40,
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
+            ),
+            const SizedBox(height: 20),
+            SizedBox(
+              width: 140,
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(2),
+                child: const LinearProgressIndicator(minHeight: 3),
+              ),
+            ),
+            const SizedBox(height: 12),
+            Text(
+              '正在打开 PDF…',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+          ],
+        ),
       );
 
   Widget _errorView() => Center(
@@ -2410,7 +2677,26 @@ class PdfReadingPageState extends State<PdfReadingPage>
           final pageNumber = index + 1;
           // 预取这一页与下一页的文本层，减少「点了没反应」的窗口
           unawaited(_session.ensureLayer(index));
-          return _pageItem(doc, pageNumber);
+          // ★★★ v1.22.62：**在这里量整个列表项的高度**，而不是听子组件上报
+          //
+          // 为什么必须在这一层：`_pageItem` 返回的是
+          // `Padding → Column → [AspectRatio(页面), 页码行, (扫描提示)]`，
+          // 滚动器使用的是**整个列表项**的高度（实测 524.93px/页），
+          // 而 `PdfPageLayer` 只能上报里面那个 `AspectRatio`（488.3px）。
+          // 差的 36.6px（Padding 16 + 页码行 20.6）就是
+          // 「页数多的书定位不到」的全部来源 —— 112 页累计偏 412px ≈ 0.8 页。
+          //
+          // 靠"页面高 + 估算常数"补不齐：页码行高度受字号/取整影响（实测 20.63，
+          // 按字号估 18.85，差 1.78px/页）。**量整项**就没有这个猜测。
+          return _MeasuredPageBlock(
+            pageIndex: index,
+            onMeasured: (double h) {
+              if (index < _pageExtents.length && h > 0) {
+                _pageExtents[index] = h;
+              }
+            },
+            child: _pageItem(doc, pageNumber),
+          );
         },
       ),
     );
@@ -2447,7 +2733,58 @@ class PdfReadingPageState extends State<PdfReadingPage>
                   onReadSentence: (index) => _readSentence(pageNumber, index),
                   onExtentChanged: (extent) {
                     if (pageIndex < _pageExtents.length) {
-                      _pageExtents[pageIndex] = extent;
+                      // ★★★ v1.22.62 找到根因了：**上报的是页面高，滚动用的是页块高**
+                      //
+                      // ## 真机实测（2026-10-26 21:40，用户那本 286 页 PDF）
+                      // ```
+                      // AF[页高实测] 第114页 页块高=488.3 理论页高=488.3 差=0.0
+                      // AF[居中] 标定 refPage=113 页顶偏移=58792   ← 真实位置
+                      // AF[居中逼近] 目标页=113 逼近偏移=58380      ← 估算位置
+                      // ```
+                      // 58792 − 58380 = **412px**，分摊到前 112 页 = 3.68px/页。
+                      // 而真实每页占 58792÷112 = **524.93px**，
+                      // 页面本身只有 488.3 → **每页少算 36.6px**。
+                      //
+                      // 36.6 = 外层 `Padding` 上下 16 + 页码行约 20.6。
+                      // `PdfPageLayer` 的 RenderBox 只覆盖"页面"这一块，
+                      // **不含** Padding 和页码行 —— 而 `ListView` 是按整个
+                      // 列表项（页块）滚动的。这个"单位不一致"就是
+                      // 「只有页数多的书定位不到」的真因：页数少的书累计误差
+                      // 不到一页，滚过去照样看得见目标页。
+                      //
+                      // ## 修法
+                      // 记录时补上**结构上确实存在的**两个量：
+                      //   · 上下 Padding：`_pageItem` 里写死 8+8
+                      //   · 页码行：`textTheme.labelSmall` 一行 + top:4
+                      // 用 `textScaler` 让页码行跟随用户字号设置，
+                      // 这样手机/平板各算各的，不再写死某个设备的实测值。
+                      //
+                      // ⚠️ 但页码行高度**不能靠估**：实测 20.63，按字号估出来是 18.85，
+                      // 差 1.78px/页 → 112 页仍偏 199px（近半页）。所以下面把
+                      // "页面高"和"页块高"**两个都记下来**：页面高用于自校验，
+                      // 页块高由**整项测量**回填（见 `_pagesView` 的 `_MeasuredPageBlock`），
+                      // 这里先给一个含估算的起步值，真值一到就覆盖。
+                      // ⚠️ **不写入 `_pageExtents`**：这里拿到的是"页面高"，
+                      // 而表里要存"页块高"。由外层 `_MeasuredPageBlock` 量整项写入。
+                      // 写进来会互相覆盖，导致两种口径来回跳（真机表现为位置抖动）。
+                      // ★v1.22.62 诊断：把**每个真实页高**打出来。
+                      // 之前一直拿"9 页均值"当基准算，但那 9 页是哪些页、
+                      // 各多高从来看不到 —— 用户已指出实测与公式差 44.5px，
+                      // 必须看清真值才能判断常数该是多少。
+                      // 理论页高按**本书自己的页面尺寸**算（原来写死 420x595，
+                      // 而这本实际是 419.52x595.44，对比没有意义）
+                      final double pw = page.width;
+                      final double ph = page.height;
+                      final double availW = MediaQuery.sizeOf(context).width - 16;
+                      final double theory =
+                          (pw > 0 && ph > 0) ? availW / (pw / ph) : 0;
+                      CrashLog.mark('AF[页高实测] 第 ${pageIndex + 1} 页 '
+                          '页面高=${extent.toStringAsFixed(1)} '
+                          '页块高=${_pageExtents[pageIndex].toStringAsFixed(1)} '
+                          '页面=${pw.toStringAsFixed(2)}x${ph.toStringAsFixed(2)} '
+                          '可用宽=${availW.toStringAsFixed(1)} '
+                          '理论页高=${theory.toStringAsFixed(1)} '
+                          '差=${theory > 0 ? (extent - theory).toStringAsFixed(1) : "?"}');
                     }
                   },
                 );
@@ -2477,4 +2814,60 @@ class PdfReadingPageState extends State<PdfReadingPage>
       ),
     );
   }
+}
+
+/// **量出列表项（页块）的真实高度**（v1.22.62）
+///
+/// `PdfPageLayer` 上报的是**页面本身**（`AspectRatio` 那一块，488.3px），
+/// 而 `ListView` 滚动使用的是**整个列表项**（页面 + 上下 Padding + 页码行，
+/// 实测 524.93px）。两者差 36.6px/页，页数一多就累积成整页偏差。
+///
+/// 这个组件把"测量"提到列表项外层，结构怎么变都不会再漏：
+/// 页码行、扫描提示行、字号缩放全自动包含在内。
+class _MeasuredPageBlock extends StatefulWidget {
+  const _MeasuredPageBlock({
+    required this.pageIndex,
+    required this.onMeasured,
+    required this.child,
+  });
+
+  final int pageIndex;
+  final ValueChanged<double> onMeasured;
+  final Widget child;
+
+  @override
+  State<_MeasuredPageBlock> createState() => _MeasuredPageBlockState();
+}
+
+class _MeasuredPageBlockState extends State<_MeasuredPageBlock> {
+  double? _last;
+
+  @override
+  void initState() {
+    super.initState();
+    _measure();
+  }
+
+  @override
+  void didUpdateWidget(covariant _MeasuredPageBlock oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // 结构可能变了（扫描提示行出现/消失、字号变化）→ 重新量
+    _measure();
+  }
+
+  void _measure() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final box = context.findRenderObject();
+      if (box is! RenderBox || !box.hasSize) return;
+      final double h = box.size.height;
+      if (h <= 0) return;
+      if (_last != null && (h - _last!).abs() < 0.5) return; // 没变就不重复上报
+      _last = h;
+      widget.onMeasured(h);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.child;
 }

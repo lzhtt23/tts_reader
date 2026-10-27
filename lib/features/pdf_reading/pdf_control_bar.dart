@@ -1,67 +1,69 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 
-import 'pdf_read_session.dart';
+/// 控制栏的展开形态（v1.22.62 · 用户 2026-10-27 拍板）
+///
+/// · [capsule] 横胶囊（MD3 风格）—— **默认**
+/// · [radial]  扇形环绕（逐键弹出动效）—— 设置里可切换
+enum PdfControlStyle { capsule, radial }
 
-/// PDF 朗读页的控制栏：**迷你条** 与 **展开态**。
+/// PDF 朗读页控制栏：**收起 = 悬浮键 / 展开 = 悬浮面板**
 ///
-/// ## 行为对齐 HANDOFF §4.92
-///
-/// 方块键（■）在阅读页的语义是「**收起成迷你条**，会话保留」——
-/// 与文档库那条「整条消失 + 会话清掉」**不一样**，别一起改。
-///
+/// ## 两种形态（设置里切换，默认胶囊）
 /// ```
-/// 迷你条：  ▶  《书名》· 第 3/319 页                        ⌃
-/// 展开态：  ⏮  ⏯  ⏭   |  语速 1.0×  |  目录  |  ⌄  |  ■
+/// 胶囊：  [⏮] [⏯] [⏭] │ [目录] [结束] [⌄]    贴右下，MD3 filled/tonal
+/// 扇形：        [目录] [⏭]
+///              [⏮]  [⏯]  [结束]              主键不动，四键依次弹出
 /// ```
 ///
-/// 迷你条的圆形播放键 = [PdfReadSession.resume]（从当前句继续），
-/// 箭头展开成完整控制条；展开态的「⌄」收起回迷你条。
-class PdfControlBar extends StatelessWidget {
+/// ## 收起
+/// 两种形态都是：**左侧小箭头（展开）+ 右侧圆形暂停键**，悬浮在正文右下角，
+/// **不占正文高度**（父页面把它画在 Stack 里，见 `pdf_reading_page.dart`）。
+///
+/// ## 为什么不再显示书名/页码
+/// 用户 2026-10-27：「展开样式也可以悬浮，精简只剩控件即可，不需文件名」。
+class PdfControlBar extends StatefulWidget {
   const PdfControlBar({
     super.key,
     required this.collapsed,
-    required this.title,
-    required this.pageLabel,
+    required this.style,
     required this.playing,
     required this.paused,
-    required this.rate,
     required this.onToggleCollapsed,
     required this.onPlayPause,
     required this.onPrevious,
     required this.onNext,
     required this.onStop,
-    required this.onRateChanged,
     required this.onOpenToc,
+    this.onTocOptions,
   });
 
-  /// 是否收起成迷你条
+  /// 是否收起成悬浮键
   final bool collapsed;
 
-  final String title;
-  final String pageLabel;
+  /// 展开形态
+  final PdfControlStyle style;
 
   /// **正在出声**（暂停态为 false）
   final bool playing;
 
   /// **暂停**（与"方块键停声"区分开）
   ///
-  /// ⚠️ v1.21.38：这两个字段必须分开传（原来是只看 `playing` 的二态）。
-  /// 用户报的「方块键停声后，通知栏暂停/播放与栏内不同步」根因就在这里：
-  /// - 通知栏的判据是 `hasSession && playing && !paused`（三态）；
-  /// - 而栏内原来只有 `playing`，于是"暂停"与"方块键停声"都显示成 ▶，
-  ///   用户按栏内 ▶ 时走的分支却不一样（`_togglePlayPause` 要看 `isPaused`）。
-  /// 现在两处共用同一套三态口径，图标与行为不会再分叉。
+  /// ⚠️ v1.21.38：`playing` 与 `paused` 必须分开传（原来只看 `playing` 的二态）。
+  /// 通知栏判据是 `hasSession && playing && !paused`（三态），
+  /// 栏内看得到 `paused` 才不会把"暂停"和"方块键停声"显示成同一个图标。
   final bool paused;
-
-  final double rate;
 
   final VoidCallback onToggleCollapsed;
   final VoidCallback onPlayPause;
   final VoidCallback onPrevious;
   final VoidCallback onNext;
   final VoidCallback onStop;
-  final ValueChanged<double> onRateChanged;
   final VoidCallback onOpenToc;
+
+  /// 「更多」入口（预留；当前未使用，保持可空以免破坏调用点）
+  final VoidCallback? onTocOptions;
 
   static const Key miniBarKey = ValueKey<String>('pdf-control-mini');
   static const Key expandedKey = ValueKey<String>('pdf-control-expanded');
@@ -73,166 +75,329 @@ class PdfControlBar extends StatelessWidget {
   static const Key expandKey = ValueKey<String>('pdf-control-expand');
   static const Key collapseKey = ValueKey<String>('pdf-control-collapse');
 
-  /// 语速档位（与原阅读页一致）
-  static const List<double> ratePresets = <double>[0.5, 0.75, 1.0, 1.25, 1.5, 2.0];
+  /// 悬浮键距底部的高度
+  ///
+  /// 88 = 「回到朗读位置」FAB（约 64 含外边距）+ 24 间距 ——
+  /// 两个都靠右下角，必须错开，否则叠在一起点不到。
+  static const double floatingBottomInset = 88;
+
+  /// 主键直径（MD3 大 FAB 尺寸）
+  static const double mainButtonSize = 56;
+
+  /// 其余键直径（MD3 标准 icon button）
+  static const double smallButtonSize = 40;
+
+  @override
+  State<PdfControlBar> createState() => _PdfControlBarState();
+}
+
+class _PdfControlBarState extends State<PdfControlBar>
+    with SingleTickerProviderStateMixin {
+  /// 展开动效（扇形逐键弹出用；胶囊也共用做淡入）
+  late final AnimationController _anim;
+
+  @override
+  void initState() {
+    super.initState();
+    _anim = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 220),
+      value: widget.collapsed ? 0 : 1,
+    );
+  }
+
+  @override
+  void didUpdateWidget(covariant PdfControlBar oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.collapsed != widget.collapsed) {
+      if (widget.collapsed) {
+        _anim.reverse();
+      } else {
+        _anim.forward(from: 0);
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    _anim.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Material(
-      color: theme.colorScheme.surfaceContainerHighest,
-      elevation: 8,
-      child: SafeArea(
-        top: false,
-        child: collapsed
-            ? _miniBar(context, theme)
-            : _expandedBar(context, theme),
-      ),
-    );
+    return widget.collapsed ? _floating(context) : _expanded(context);
   }
 
-  /// 46dp 迷你条：圆形播放键 + 「《书名》· 第 N/M 页」+ 展开箭头
-  Widget _miniBar(BuildContext context, ThemeData theme) {
-    return SizedBox(
-      key: miniBarKey,
-      height: 46,
-      child: Row(
-        children: <Widget>[
-          const SizedBox(width: 4),
-          SizedBox(
-            width: 36,
-            height: 36,
-            child: IconButton(
-              key: playPauseKey,
-              padding: EdgeInsets.zero,
-              iconSize: 22,
-              // 迷你条的播放键语义是「继续」（从当前句接着读）
-              onPressed: onPlayPause,
-              icon: Icon(playing ? Icons.pause_circle : Icons.play_circle),
-              tooltip: playing ? '暂停' : '继续朗读',
-            ),
-          ),
-          const SizedBox(width: 6),
-          Expanded(
-            child: Text(
-              '$title · $pageLabel',
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: theme.textTheme.bodyMedium,
-            ),
-          ),
-          IconButton(
-            key: expandKey,
-            onPressed: onToggleCollapsed,
-            icon: const Icon(Icons.keyboard_arrow_up),
-            tooltip: '展开控制栏',
-          ),
-        ],
-      ),
-    );
-  }
+  // ───────────────────── 收起态：悬浮键 ─────────────────────
 
-  Widget _expandedBar(BuildContext context, ThemeData theme) {
-    return Column(
-      key: expandedKey,
-      mainAxisSize: MainAxisSize.min,
-      children: <Widget>[
-        // 第一行：书名 + 页码 + 收起
-        Padding(
-          padding: const EdgeInsets.fromLTRB(12, 6, 4, 0),
-          child: Row(
-            children: <Widget>[
-              Expanded(
-                child: Text(
-                  title,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: theme.textTheme.titleSmall,
-                ),
-              ),
-              Text(pageLabel, style: theme.textTheme.labelMedium),
-              IconButton(
-                key: collapseKey,
-                onPressed: onToggleCollapsed,
-                icon: const Icon(Icons.keyboard_arrow_down),
-                tooltip: '收起成小条',
-              ),
-            ],
-          ),
+  Widget _floating(BuildContext context) {
+    return Align(
+      alignment: Alignment.bottomRight,
+      child: Padding(
+        padding: const EdgeInsets.only(
+          right: 16,
+          bottom: PdfControlBar.floatingBottomInset,
         ),
-        // 第二行：播放控制
-        //
-        // ⚠️ IconButton 默认 48×48（HANDOFF §9.45）：这一行有 4 个按钮，
-        // 窄屏（320dp）会 overflow。用 Wrap 而不是 Row 兜住。
-        Wrap(
-          alignment: WrapAlignment.center,
-          crossAxisAlignment: WrapCrossAlignment.center,
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
           children: <Widget>[
-            IconButton(
-              key: prevKey,
-              onPressed: onPrevious,
-              icon: const Icon(Icons.skip_previous),
-              tooltip: '上一句',
+            _roundButton(
+              context,
+              key: PdfControlBar.expandKey,
+              icon: Icons.keyboard_arrow_up,
+              tooltip: '展开控制栏',
+              size: PdfControlBar.smallButtonSize,
+              tonal: true,
+              onTap: widget.onToggleCollapsed,
             ),
-            IconButton(
-              key: playPauseKey,
-              onPressed: onPlayPause,
-              iconSize: 32,
-              icon: Icon(playing ? Icons.pause_circle : Icons.play_circle),
-              tooltip: playing ? '暂停' : '继续朗读',
-            ),
-            IconButton(
-              key: nextKey,
-              onPressed: onNext,
-              icon: const Icon(Icons.skip_next),
-              tooltip: '下一句',
-            ),
-            IconButton(
-              key: tocKey,
-              onPressed: onOpenToc,
-              icon: const Icon(Icons.list_alt),
-              tooltip: '目录',
-            ),
-            IconButton(
-              key: stopKey,
-              onPressed: onStop,
-              icon: const Icon(Icons.stop),
-              tooltip: '结束朗读',
+            const SizedBox(width: 10),
+            _roundButton(
+              context,
+              key: PdfControlBar.playPauseKey,
+              icon: widget.playing ? Icons.pause : Icons.play_arrow,
+              tooltip: widget.playing ? '暂停' : '继续朗读',
+              size: PdfControlBar.mainButtonSize,
+              filled: true,
+              onTap: widget.onPlayPause,
             ),
           ],
         ),
-        // 第三行：语速
-        Padding(
-          padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
-          child: Row(
-            children: <Widget>[
-              Text('语速', style: theme.textTheme.labelMedium),
-              Expanded(
-                child: Slider(
-                  value: _nearestPreset(rate),
-                  min: 0,
-                  max: (ratePresets.length - 1).toDouble(),
-                  divisions: ratePresets.length - 1,
-                  label: '${_nearestPreset(rate).toStringAsFixed(2)}×',
-                  onChanged: (value) =>
-                      onRateChanged(ratePresets[value.round()]),
-                ),
-              ),
-              Text('${rate.toStringAsFixed(2)}×',
-                  style: theme.textTheme.labelMedium),
-            ],
-          ),
-        ),
-      ],
+      ),
     );
   }
 
-  /// 把任意语速吸附到最近的档位（滑块只能停在这些点上）
-  double _nearestPreset(double value) {
-    var best = ratePresets.first;
-    for (final preset in ratePresets) {
-      if ((preset - value).abs() < (best - value).abs()) best = preset;
-    }
-    return best;
+  // ───────────────────── 展开态 ─────────────────────
+
+  Widget _expanded(BuildContext context) {
+    return widget.style == PdfControlStyle.radial
+        ? _radial(context)
+        : _capsule(context);
+  }
+
+  /// 胶囊：一行 icon，MD3 filled/tonal + divider
+  Widget _capsule(BuildContext context) {
+    final ColorScheme cs = Theme.of(context).colorScheme;
+    return Align(
+      alignment: Alignment.bottomRight,
+      child: FadeTransition(
+        opacity: _anim,
+        child: Padding(
+          padding: const EdgeInsets.only(
+            right: 16,
+            bottom: PdfControlBar.floatingBottomInset,
+          ),
+          child: Material(
+            key: PdfControlBar.expandedKey,
+            color: cs.surfaceContainerHigh,
+            elevation: 6,
+            shape: const StadiumBorder(),
+            child: Padding(
+              padding: const EdgeInsets.all(8),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: <Widget>[
+                  _roundButton(context,
+                      key: PdfControlBar.prevKey,
+                      icon: Icons.skip_previous,
+                      tooltip: '上一句',
+                      size: PdfControlBar.smallButtonSize,
+                      tonal: true,
+                      onTap: widget.onPrevious),
+                  const SizedBox(width: 6),
+                  _roundButton(context,
+                      key: PdfControlBar.playPauseKey,
+                      icon: widget.playing ? Icons.pause : Icons.play_arrow,
+                      tooltip: widget.playing ? '暂停' : '继续朗读',
+                      size: PdfControlBar.mainButtonSize,
+                      filled: true,
+                      onTap: widget.onPlayPause),
+                  const SizedBox(width: 6),
+                  _roundButton(context,
+                      key: PdfControlBar.nextKey,
+                      icon: Icons.skip_next,
+                      tooltip: '下一句',
+                      size: PdfControlBar.smallButtonSize,
+                      tonal: true,
+                      onTap: widget.onNext),
+                  // divider：MD3 里用来分组，比间距更省横向空间
+                  Container(
+                    width: 1,
+                    height: 24,
+                    margin: const EdgeInsets.symmetric(horizontal: 8),
+                    color: cs.outlineVariant,
+                  ),
+                  _roundButton(context,
+                      key: PdfControlBar.tocKey,
+                      icon: Icons.list_alt,
+                      tooltip: '目录',
+                      size: PdfControlBar.smallButtonSize,
+                      tonal: true,
+                      onTap: widget.onOpenToc),
+                  const SizedBox(width: 6),
+                  _roundButton(context,
+                      key: PdfControlBar.stopKey,
+                      icon: Icons.stop,
+                      tooltip: '结束朗读',
+                      size: PdfControlBar.smallButtonSize,
+                      tonal: true,
+                      onTap: widget.onStop),
+                  const SizedBox(width: 6),
+                  _roundButton(context,
+                      key: PdfControlBar.collapseKey,
+                      icon: Icons.keyboard_arrow_down,
+                      tooltip: '收起',
+                      size: PdfControlBar.smallButtonSize,
+                      tonal: true,
+                      onTap: widget.onToggleCollapsed),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 扇形：主键不动，四键依次弹出
+  ///
+  /// ## 为什么主键不动
+  /// 用户 2026-10-27：「f 可以加一个按键逐个展开的动效」。
+  /// 主键保持原位，视觉锚点不跳，展开/收起都不会点偏。
+  Widget _radial(BuildContext context) {
+    const double radius = 92;
+    const double halfMain = PdfControlBar.mainButtonSize / 2;
+    const double halfSmall = PdfControlBar.smallButtonSize / 2;
+    // 画布边长：够放最远那个键 + 主键半径
+    const double side = radius + halfMain + PdfControlBar.smallButtonSize + 8;
+
+    final List<({double angle, Key key, IconData icon, String tip, VoidCallback onTap})>
+        items = <({double angle, Key key, IconData icon, String tip, VoidCallback onTap})>[
+      (angle: 180, key: PdfControlBar.prevKey, icon: Icons.skip_previous, tip: '上一句', onTap: widget.onPrevious),
+      (angle: 135, key: PdfControlBar.nextKey, icon: Icons.skip_next, tip: '下一句', onTap: widget.onNext),
+      (angle: 90, key: PdfControlBar.tocKey, icon: Icons.list_alt, tip: '目录', onTap: widget.onOpenToc),
+      (angle: 225, key: PdfControlBar.stopKey, icon: Icons.stop, tip: '结束朗读', onTap: widget.onStop),
+    ];
+
+    // 主键圆心在画布右下角内侧
+    const double mainCx = side - halfMain;
+    const double mainCy = side - halfMain;
+
+    return Align(
+      alignment: Alignment.bottomRight,
+      child: Padding(
+        padding: const EdgeInsets.only(
+          right: 16,
+          bottom: PdfControlBar.floatingBottomInset - 24,
+        ),
+        child: SizedBox(
+          key: PdfControlBar.expandedKey,
+          width: side,
+          height: side + 44, // 底部再留出"收起"箭头的空间
+          child: Stack(
+            clipBehavior: Clip.none,
+            children: <Widget>[
+              for (int i = 0; i < items.length; i++)
+                AnimatedBuilder(
+                  animation: _anim,
+                  builder: (BuildContext context, Widget? child) {
+                    // 每个键错开 0.10 的窗口，形成"逐个弹出"
+                    final double begin = (i * 0.10).clamp(0.0, 0.6);
+                    final double end = (begin + 0.55).clamp(0.01, 1.0);
+                    final double raw =
+                        ((_anim.value - begin) / (end - begin)).clamp(0.0, 1.0);
+                    final double t = Curves.easeOutBack.transform(raw);
+                    final double rad = items[i].angle * math.pi / 180;
+                    final double cx = mainCx + radius * t * math.cos(rad);
+                    final double cy = mainCy - radius * t * math.sin(rad);
+                    return Positioned(
+                      left: cx - halfSmall,
+                      top: cy - halfSmall,
+                      child: Opacity(
+                        opacity: raw.clamp(0.0, 1.0),
+                        child: Transform.scale(scale: 0.6 + 0.4 * t, child: child),
+                      ),
+                    );
+                  },
+                  child: _roundButton(context,
+                      key: items[i].key,
+                      icon: items[i].icon,
+                      tooltip: items[i].tip,
+                      size: PdfControlBar.smallButtonSize,
+                      tonal: true,
+                      onTap: items[i].onTap),
+                ),
+              // 主键：位置固定
+              Positioned(
+                left: mainCx - halfMain,
+                top: mainCy - halfMain,
+                child: _roundButton(context,
+                    key: PdfControlBar.playPauseKey,
+                    icon: widget.playing ? Icons.pause : Icons.play_arrow,
+                    tooltip: widget.playing ? '暂停' : '继续朗读',
+                    size: PdfControlBar.mainButtonSize,
+                    filled: true,
+                    onTap: widget.onPlayPause),
+              ),
+              // 收起：主键正下方
+              Positioned(
+                left: mainCx - 16,
+                top: mainCy + halfMain + 10,
+                child: _roundButton(context,
+                    key: PdfControlBar.collapseKey,
+                    icon: Icons.keyboard_arrow_down,
+                    tooltip: '收起',
+                    size: 32,
+                    tonal: true,
+                    onTap: widget.onToggleCollapsed),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  // ───────────────────── 通用圆形按钮 ─────────────────────
+
+  /// MD3 圆形 icon 按钮
+  ///
+  /// · [filled] 主色实心（主键）
+  /// · [tonal]  secondaryContainer（次键）
+  Widget _roundButton(
+    BuildContext context, {
+    required Key key,
+    required IconData icon,
+    required String tooltip,
+    required double size,
+    required VoidCallback onTap,
+    bool filled = false,
+    bool tonal = false,
+  }) {
+    final ColorScheme cs = Theme.of(context).colorScheme;
+    final Color bg = filled
+        ? cs.primary
+        : (tonal ? cs.secondaryContainer : cs.surfaceContainerHighest);
+    final Color fg = filled
+        ? cs.onPrimary
+        : (tonal ? cs.onSecondaryContainer : cs.onSurfaceVariant);
+    return Tooltip(
+      message: tooltip,
+      child: Material(
+        color: bg,
+        shape: const CircleBorder(),
+        elevation: filled ? 3 : 0,
+        child: InkWell(
+          key: key,
+          customBorder: const CircleBorder(),
+          onTap: onTap,
+          child: SizedBox(
+            width: size,
+            height: size,
+            child: Icon(icon, size: size * 0.5, color: fg, semanticLabel: tooltip),
+          ),
+        ),
+      ),
+    );
   }
 }

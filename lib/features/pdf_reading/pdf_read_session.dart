@@ -610,6 +610,10 @@ class PdfReadSession extends ChangeNotifier implements AudioSessionSource {
     Future<PdfPageTextLayer?> Function(int pageIndex)? layerLoader,
   }) async {
     _layerLoader = layerLoader;
+    // ★v1.22.62：打开 PDF 就把引擎音频通路预热好（零音量）。
+    // 与 `TtsManager.loadDocument` 里同一处优化，覆盖"PDF 借声朗读"这条路径。
+    TtsManager.instance.warmUpAudioPath();
+    // ⚠️ 同上：不在此处预建媒体键静音轨，留到开始朗读时（瞬态被语音掩盖）。
     if (docRef != null) _docRef = docRef;
     if (_documentId == documentId && _pageCount == pageCount) {
       // 同一本书重进：**保留 _current**，这样「退出阅读页 → 再进来」能接着读。

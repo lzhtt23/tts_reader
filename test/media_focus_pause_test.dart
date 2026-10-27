@@ -1,6 +1,7 @@
 import 'package:audio_session/audio_session.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:tts_reader/services/device_info.dart';
 import 'package:tts_reader/services/storage_service.dart';
 import 'package:tts_reader/tts/audio_session_source.dart';
 import 'package:tts_reader/tts/media_interruption.dart';
@@ -176,6 +177,13 @@ void main() {
     // 真机日志（设备 PKG110 / ColorOS）：9 次按键全是 `媒体控制[play]`，
     // 其中三次发生在 `playing=true paused=false`（用户按的是"暂停"）——
     // 于是 play() → playFromCursor() → **重播当前句**，用户看到"按暂停反而重播"。
+    //
+    // ★v1.22.58：这条兼容逻辑现在**只在 ColorOS 系生效**（`DeviceInfo.isColorOsSync`），
+    // 因为它无条件执行时会让联想平板（ZUI）"按播放永远恢复不了"。
+    // 所以这里必须显式声明设备是 ColorOS，否则测的是另一条分支。
+    DeviceInfo.debugSetColorOs(true);
+    addTearDown(DeviceInfo.debugReset);
+
     final TtsAudioHandler handler = TtsAudioHandler(TtsManager.instance);
     final _FakeSource source = _FakeSource()
       ..playingValue = true
@@ -191,6 +199,9 @@ void main() {
   });
 
   test('ColorOS ROM 兼容：暂停态来的 play() 仍然正常播放', () async {
+    DeviceInfo.debugSetColorOs(true);
+    addTearDown(DeviceInfo.debugReset);
+
     final TtsAudioHandler handler = TtsAudioHandler(TtsManager.instance);
     final _FakeSource source = _FakeSource()
       ..playingValue = false
@@ -200,6 +211,28 @@ void main() {
     await handler.play();
     expect(source.playCalled, isTrue, reason: '暂停态必须能恢复播放');
     expect(source.pauseCalled, isFalse);
+  });
+
+  // ★v1.22.58 回归用例：**非 ColorOS 设备不得走上面那条兼容分支**
+  //
+  // 真机事实：联想平板（ZUI / ZUXOS）上耳机键发的是标准 `MEDIA_PLAY_PAUSE`，
+  // 暂停后按播放 → 系统给 `play()`。旧代码无条件把"正在播时的 play()"当暂停，
+  // 结果平板上"按播放永远恢复不了"。这条用例把新默认钉死：
+  // 只有 ColorOS 才当暂停，其它 ROM 的 play() 必须是**真的播放**。
+  test('非 ColorOS：正在播放时来的 play() 必须真的恢复播放（不能当暂停）', () async {
+    DeviceInfo.debugSetColorOs(false);
+    addTearDown(DeviceInfo.debugReset);
+
+    final TtsAudioHandler handler = TtsAudioHandler(TtsManager.instance);
+    final _FakeSource source = _FakeSource()
+      ..playingValue = true
+      ..pausedValue = false;
+    handler.activate(source);
+
+    await handler.play();
+    expect(source.pauseCalled, isFalse,
+        reason: '非 ColorOS 上不能把 play() 当暂停 —— 那会让"按播放"永远没反应');
+    expect(source.playCalled, isTrue, reason: '非 ColorOS 上 play() 就是播放');
   });
 
   test('阅读页 pause()：同样不释放音频焦点', () async {

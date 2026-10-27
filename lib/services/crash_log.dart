@@ -68,6 +68,16 @@ class CrashLog {
 
   /// 主动记一条（关键流程埋点，便于定位「崩在哪一步」）
   static void mark(String message) {
+    // ★v1.22.62：**同时打到 logcat**，让 `adb logcat -s flutter` 能实时看到埋点。
+    //
+    // 为什么必须加：`mark()` 原来只写应用私有目录，而 release 包 `run-as` 被系统
+    // 拒绝 → adb 读不到 → 每次排查都得让用户手工"导出日志→发文件"。
+    // 定位这种要反复试的问题，这个成本高到无法迭代。
+    //
+    // release 包里 `print` 仍会进 logcat（flutter 标签），开销只是一次字符串
+    // 拼接，可忽略。文件写入保持不变（崩溃后仍可回溯）。
+    // ignore: avoid_print
+    print(message);
     _chain = _chain.then((_) => _append(message));
   }
 

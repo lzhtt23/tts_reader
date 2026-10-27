@@ -45,11 +45,35 @@ class MediaInterruptionController {
   /// 结束时什么都不用做。这是本设计要保住的"成功路径"。
   bool _pausedForInterruption = false;
 
+  /// **T2S 风格实验开关**（v1.22.62）：完全不申请音频焦点
+  ///
+  /// ## 为什么做这个实验
+  /// 虚拟机对照实验（见 `docs/2026-10-27-媒体键会话归属-虚拟机对照实验.md`）
+  /// 证明：**T2S 之所以能长期占住耳机媒体键，是因为它从不申请音频焦点**
+  /// —— 因此从不被打断，会话状态永远停在 `PLAYING`。
+  ///
+  /// 而我们申请焦点 → 被别的媒体打断 → 上报 PAUSED → 最终会话走到
+  /// `active=false / NONE` → 退出优先级栈 → 按键再也回不来。
+  ///
+  /// 本开关＝T2S 的配置：不申请焦点（配合 `_kUseSilentTrack = false` 一起用）。
+  ///
+  /// ## ⚠️ 这是实验值，代价明确
+  /// - **来电 / 闹钟不会再把朗读暂停**（这是行为倒退）
+  /// - 朗读会与音乐**同时出声**（用户已表示不需要同时播放）
+  ///
+  /// 若实测证明「耳机可用性」的收益大于这两个代价，再讨论是否长期采用；
+  /// 否则回退到 `anchor-test35`。
+  static const bool _kT2sStyleNoFocus = false;
+
   /// 朗读真正开始 / 继续时调用：申请音频焦点（受开关控制）
   ///
   /// 返回是否真的拿到了焦点。拿不到（例如别的应用正占着且不让）也照常朗读 ——
   /// 不给用户「点了没声音」的困惑。
   Future<bool> requestFocus() async {
+    if (_kT2sStyleNoFocus) {
+      CrashLog.mark('焦点[T2S实验] 不申请音频焦点（保持 PLAYING 以占住媒体键）');
+      return false;
+    }
     await _ensureInit();
     if (!StorageService.instance.allowMediaInterrupt) return false;
     final session = _session;
@@ -171,9 +195,12 @@ class MediaInterruptionController {
 
   /// 当前音频会话配置（**只给测试看**）
   ///
-  /// 用它钉住一条硬要求：「**朗读不被通知打断**」——
-  /// 也就是两种模式下 `androidWillPauseWhenDucked` 都必须是 `false`
-  /// （true = 系统提示音一 duck 就把我们暂停，见 [_configuration] 的说明）。
+  /// 用它钉住一条硬要求：**`androidWillPauseWhenDucked` 必须保持 `true`**
+  /// （两种模式都是）—— 因为该开关**整个停掉 duck 事件上报**，关掉之后
+  /// 「视频/其它播放器出声时让位」会失效。见 [_configuration] 里 v1.21.39 的回退记录。
+  ///
+  /// ⚠️ 这里以前写的是「必须是 `false`」，与实现和测试**都相反**（注释过期）。
+  /// 测试 `media_interruption_test` 断言的是 `isTrue`，与实现一致；以那条为准。
   @visibleForTesting
   AudioSessionConfiguration get debugConfiguration => _configuration();
 

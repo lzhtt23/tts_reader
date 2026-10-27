@@ -201,11 +201,38 @@
                 <action android:name="android.intent.action.MEDIA_BUTTON" />
             </intent-filter>
         </receiver>
-        <!-- 媒体键兜底：耳机 / 平板按键（真机实测这是唯一有效的接收路径） -->
+        <!-- ⚠️ 这个接收器必须保持 android:enabled="false"（v1.22.56 实测结论，别再打开）
+             它曾经是「手机耳机键」的补救方案（v1.22.13 起），但**实际从未收到过按键**：
+             系统把媒体键派给「当前媒体键会话」或它的 mediaButtonReceiver，
+             不会广播给所有清单接收器。
+
+             更糟的是它**破坏了兜底路径**：MediaSessionCompat 构造时调用
+             androidx.media.session.MediaButtonReceiver.getMediaButtonReceiverComponent()，
+             该方法 `queryBroadcastReceivers(MEDIA_BUTTON)` 的结果**必须恰好为 1 个**，
+             多于一个就返回 null（Log.w: "More than one BroadcastReceiver ..."）。
+             本应用因此有两个 MEDIA_BUTTON 接收器（audio_service 的 + 本类）→
+             会话的 mediaButtonReceiver **恒为 null** → 暂停时系统无处可路由 →
+             按键落到别的音乐 App（实测 com.hoilai.mm.music / 抖音）。
+
+             关掉本类之后，接收器只剩 audio_service 那一个，会话的
+             mediaButtonReceiver 恢复成 com.ryanheise.audioservice.MediaButtonReceiver，
+             「暂停中按键」也能回到本应用。验证方式：
+               adb shell dumpsys media_session | grep -A4 "media-session com.example.tts_reader"
+             `mediaButtonReceiver=` 非 null 即正确。
+        -->
         <receiver
             android:name=".TtsMediaButtonReceiver"
-            android:exported="true">
-            <intent-filter android:priority="2147483647">
+            android:exported="true"
+            android:enabled="false">
+            <!-- ⚠️ 这里以前写过 android:priority="2147483647"，是**基于错误假设**的设置：
+                 当时的想法是「广播优先级拉满就能抢到媒体键」。实际上媒体键**不按广播
+                 优先级选接收者** —— 系统先把键派给「媒体键会话」（见 §4.116 / §4.110.8），
+                 广播只是没有会话可用时的兜底。优先级调到最大没有任何帮助，已删除。
+
+                 另外：多个 MEDIA_BUTTON 接收器会让 MediaSessionCompat 解析不到唯一接收器
+                 （→ 会话的 mediaButtonReceiver 为空），所以这个类才要 enabled="false"。
+                 详见 §4.116。 -->
+            <intent-filter>
                 <action android:name="android.intent.action.MEDIA_BUTTON" />
             </intent-filter>
         </receiver>

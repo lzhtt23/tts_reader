@@ -48,6 +48,8 @@ class MainActivity : AudioServiceActivity() {
         LameChannel.attach(flutterEngine.dartExecutor.binaryMessenger)
         // 启动图标样式切换（tts_reader/icon：切 activity-alias，无需权限）
         IconChannel.attach(this, flutterEngine.dartExecutor.binaryMessenger)
+        // 厂商标识（tts_reader/device：判断是否 ColorOS 系，供媒体键兼容分支使用）
+        DeviceChannel.attach(flutterEngine.dartExecutor.binaryMessenger)
         // 耳机 / 媒体键：TtsMediaButtonReceiver 收到 ACTION_MEDIA_BUTTON 广播后经此转给
         // Dart。少了这一句，接收器能收到按键却转不出去（channel 恒为 null）。
         MediaKeyChannel.attach(flutterEngine.dartExecutor.binaryMessenger)

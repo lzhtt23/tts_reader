@@ -140,6 +140,10 @@ void main() {
       }
       expect(find.text('目录'), findsOneWidget);
 
+      // v1.22.62：目录改成右侧悬浮卡片（高度 62% 屏高，比原来的 75% 矮），
+      // 目标项可能在可视区外 —— 先滚到它再点。断言的仍是"点了就跳"这个行为。
+      await tester.ensureVisible(find.text('第 2 页').first);
+      await tester.pump();
       await tester.tap(find.text('第 2 页').first);
       for (var i = 0; i < 60; i++) {
         await tester.pump(const Duration(milliseconds: 50));

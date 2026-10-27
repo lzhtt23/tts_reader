@@ -27,17 +27,14 @@ void main() {
       home: Scaffold(
         bottomNavigationBar: PdfControlBar(
           collapsed: false,
-          title: '测试 PDF',
-          pageLabel: '第 1 / 10 页',
+          style: PdfControlStyle.capsule,
           playing: playing,
           paused: paused,
-          rate: 1.0,
           onToggleCollapsed: () {},
           onPlayPause: onPlayPause ?? () {},
           onPrevious: () {},
           onNext: () {},
           onStop: () {},
-          onRateChanged: (_) {},
           onOpenToc: () {},
         ),
       ),
@@ -56,21 +53,21 @@ void main() {
 
   testWidgets('正在朗读 → 显示暂停图标，不可点（暂停不是"停声"）', (tester) async {
     await pumpBar(tester, playing: true, paused: false);
-    expect(iconOf(tester), Icons.pause_circle);
+    expect(iconOf(tester), Icons.pause);
     // ignore: avoid_print
     print('DEVICE_VERIFY[pdf-bar] playing=true paused=false → 暂停图标');
   });
 
   testWidgets('暂停中 → 显示播放图标', (tester) async {
     await pumpBar(tester, playing: false, paused: true);
-    expect(iconOf(tester), Icons.play_circle);
+    expect(iconOf(tester), Icons.play_arrow);
     // ignore: avoid_print
     print('DEVICE_VERIFY[pdf-bar] playing=false paused=true → 播放图标');
   });
 
   testWidgets('方块键停声后（既不在播也没暂停）→ 播放图标', (tester) async {
     await pumpBar(tester, playing: false, paused: false);
-    expect(iconOf(tester), Icons.play_circle);
+    expect(iconOf(tester), Icons.play_arrow);
     // ignore: avoid_print
     print('DEVICE_VERIFY[pdf-bar] playing=false paused=false（停声）→ 播放图标');
   });

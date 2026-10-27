@@ -142,6 +142,20 @@ class StorageService {
   /// PDF 朗读句纵向位置档位（0.35 / 0.5 / 0.65）
   static const String _kPdfSentenceAlignment = 'pdf_sentence_alignment';
   static const String _kSpeechDiagEnabled = 'speech_diag_enabled';
+
+  /// PDF 控制栏展开形态（v1.22.62）：false=胶囊（默认） true=扇形
+  static const String _kPdfRadialControl = 'pdf_radial_control';
+
+  /// 耳机键兼容模式（v1.22.62）：是否需要静音音轨兜底媒体键路由
+  ///
+  /// 默认 **false**（不用音轨）。理由：多数设备靠 `audio_service` 自带的
+  /// MediaSession 就能收到耳机键，而静音音轨会在**每个进程首次创建时**响一下
+  /// （音频通路通电瞬态，无法消除）。
+  ///
+  /// 少数系统（如 ColorOS 系）在别的媒体播放/暂停后会夺走媒体键归属，
+  /// 那时才需要打开本开关，用静音音轨把自己"伪装成正在播放的媒体"把归属抢回来。
+  /// 用户打开它的那一下会听到一声"啪"，这是自选的代价。
+  static const String _kMediaButtonCompat = 'media_button_compat';
   static const String _kSpeechDiagToExternal = 'speech_diag_to_external';
   /// 浏览器默认首页
   ///
@@ -206,6 +220,12 @@ class StorageService {
   final ValueNotifier<int> appearance = ValueNotifier<int>(0);
 
   /// 朗读跳动检测（诊断系统）开关：默认关，发布包里用户看不见指示灯与导出入口。
+  /// PDF 控制栏展开形态：false=胶囊（默认） true=扇形逐键展开
+  final ValueNotifier<bool> pdfRadialControl = ValueNotifier<bool>(false);
+
+  /// 耳机键兼容模式：true=用静音音轨兜底媒体键路由（会有一声"啪"）
+  final ValueNotifier<bool> mediaButtonCompat = ValueNotifier<bool>(false);
+
   final ValueNotifier<bool> speechDiagEnabled = ValueNotifier<bool>(false);
 
   /// 诊断文件是否保存到**系统可见**的应用外部目录（v1.21.28）。
@@ -375,6 +395,8 @@ class StorageService {
     _pdfSentenceAlignment = 0.35;
     _tutorialDone = false;
     _tutorialContentVersion = 0;
+    pdfRadialControl.value = false;
+    mediaButtonCompat.value = false;
     speechDiagEnabled.value = false;
     _speechDiagToExternal = true;
     _downloadTarget = DownloadTarget.publicDownloads;
@@ -409,6 +431,8 @@ class StorageService {
     }
     final perPage = sp.getInt(_kParagraphsPerPage);
     if (perPage != null && perPage >= 5) _paragraphsPerPage = perPage;
+    pdfRadialControl.value = sp.getBool(_kPdfRadialControl) ?? false;
+    mediaButtonCompat.value = sp.getBool(_kMediaButtonCompat) ?? false;
     speechDiagEnabled.value = sp.getBool(_kSpeechDiagEnabled) ?? false;
     _speechDiagToExternal = sp.getBool(_kSpeechDiagToExternal) ?? true;
     _autoFormatDocs = (sp.getStringList(_kAutoFormatDocs) ?? const <String>[]).toSet();
@@ -717,6 +741,18 @@ class StorageService {
 
   Future<void> saveTtsSettings(Map<String, dynamic> settings) async =>
       (await _sp).setString(_kTtsSettings, jsonEncode(settings));
+
+  /// PDF 控制栏展开形态：true=扇形逐键展开，false=胶囊（默认）
+  Future<void> setPdfRadialControl(bool value) async {
+    pdfRadialControl.value = value;
+    await (await _sp).setBool(_kPdfRadialControl, value);
+  }
+
+  /// 耳机键兼容模式：true=用静音音轨兜底（有"啪"一声），false=不用（干净）
+  Future<void> setMediaButtonCompat(bool value) async {
+    mediaButtonCompat.value = value;
+    await (await _sp).setBool(_kMediaButtonCompat, value);
+  }
 
   /// 朗读跳动检测开关（诊断系统；默认关）
   Future<void> setSpeechDiagEnabled(bool value) async {

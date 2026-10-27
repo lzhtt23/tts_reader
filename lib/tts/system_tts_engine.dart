@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter_tts/flutter_tts.dart';
 
+import '../services/crash_log.dart';
 import 'tts_engine.dart';
 
 /// 系统 TTS 引擎（flutter_tts）
@@ -178,6 +179,120 @@ class SystemTtsEngine implements TtsEngine, LocalEngineHost {
   @override
   Future<void> setPitch(double pitch) => _tts.setPitch(pitch);
 
+  // ⚠️ v1.22.62：这里曾实现过「首次发声音量渐起」来消外放爆音，
+  // **已撤掉** —— 用户实测反馈「启动时句子声音太小，影响使用」。
+  //
+  // 教训：靠降低首句音量换消音是不可接受的取舍。首句必须**正常音量**开口。
+  // 若要再处理爆音，只能走"不改变用户听到的音量"的路子（例如引擎侧预热），
+  // 不要再来动用户会听到的音量。
+
+  // ─────────── 引擎音频预热（v1.22.62 · 用户批准后实现） ───────────
+  //
+  // ## 治什么
+  // 真机（平板，2026-10-26）：「冷启动开始朗读时有点爆音」。
+  // 已确认系统不给淡入（`get fade type, but return null`）、
+  // 也不做爆音优化（`pop_optimize mIsPopOptimizeSupport:0`），
+  // 所以音频设备**第一次被唤醒**时的瞬态冲击只能由我们规避。
+  //
+  // ## 思路
+  // 在用户按下播放**之前**（打开文档时）就用**零音量**让引擎把音频轨道建好，
+  // 等真正朗读时该设备已经是热的 —— 爆音被提前到"静音、没人注意"的时刻。
+  //
+  // ## ⚠️ 两条保险，防止重演"首句声音变小"
+  // 1. 预热期间音量恒为 0，**从来没有把它当正常音量用过**；
+  // 2. `speak()` 在提交真正的句子前，如果发现预热还在进行，
+  //    会先 `stop()` + 把音量强制拉回 1.0 —— 首句永远是满音量。
+  //
+  // 只要有一条成立，用户就听不到"声音小"；两条一起上是为了万无一失。
+  bool _warmUpInFlight = false;
+
+  /// **是否做引擎音频预热**（v1.22.62 A/B 实验开关）
+  ///
+  /// `true`  = 打开文档时用零音量说一句，预热引擎音频通路（会创建一条音轨）
+  /// `false` = 完全不预热（本次实验值）
+  ///
+  /// ⚠️ 这个预热从未证明有效（加了之后爆音照旧），却会多创建一条音轨。
+  /// 实验结束后按结论固定成最终值，不要长期留成开关。
+  static const bool _kWarmUpAudioPath = false;
+
+  /// 预热是否已完成（同一引擎实例只做一次）
+  bool _warmedUp = false;
+
+  /// 用**零音量**跑一句，只为让引擎建立音频轨道
+  ///
+  /// 失败一律吞掉：预热只是优化，绝不能影响朗读。
+  Future<void> warmUpAudioPath() async {
+    // ★ v1.22.62 实验：**关闭 TTS 引擎预热**。
+    //
+    // 预热本身会创建一条引擎音轨（在 `org.nobody.multitts` 进程里），
+    // 而用户反馈「打开文档时爆音提前触发」—— 那次瞬态很可能就是它，
+    // 而不是静音轨（静音轨当时已挪到应用启动）。
+    //
+    // 而且这个预热**从没证明过有效**：加它之后爆音照旧。
+    // 所以本次 A/B 实验把**两条自建音轨（静音轨 + 引擎预热）全部关掉**，
+    // 才能确认"啪"到底来自哪一条、以及关掉后耳机是否仍可用。
+    if (!_kWarmUpAudioPath) {
+      CrashLog.mark('预热[已禁用] 不再为消爆音创建引擎音轨');
+      return;
+    }
+    if (_disposed || _warmedUp || _warmUpInFlight) {
+      CrashLog.mark('预热[跳过] disposed=$_disposed warmed=$_warmedUp '
+          'inFlight=$_warmUpInFlight');
+      return;
+    }
+    _warmUpInFlight = true;
+    try {
+      CrashLog.mark('预热[开始]');
+      await initialize();
+      if (_disposed) return;
+      await _tts.setVolume(0.0);
+      // 极短的一句：目的是触发引擎建 AudioTrack
+      final r = await _tts.speak('嗯');
+      CrashLog.mark('预热[speak返回] result=$r');
+      // 给引擎足够时间把轨道真正 start()，并让"嗯"自然说完
+      await Future<void>.delayed(const Duration(milliseconds: 900));
+    } catch (_) {
+      // 预热失败无所谓，忽略
+    } finally {
+      _warmUpInFlight = false;
+      _warmedUp = true;
+      if (!_disposed) {
+        // ★★ v1.22.62 修正：**这里绝对不能调 `stop()`**
+        //
+        // 真机日志（2026-10-26 23:32，平板）：
+        // ```
+        // 23:32:29.194  预热[speak返回] result=1
+        // 23:32:29.547  预热[结束]        ← 旧代码在这里 stop() 了
+        // 23:32:29.949  真正播放          ← 400ms 后，又变成冷启动
+        // ```
+        // `stop()` 会让引擎**释放音频轨道**，于是 400ms 后真正发声时
+        // 音频设备又回到冷的 —— 预热等于白做。
+        //
+        // 现在改成：让"嗯"以零音量**自然说完**（不 stop），
+        // 引擎的轨道保持存活到真正朗读，才是真正"热"的。
+        // 音量在"嗯"说完之后再恢复，用户不会听到它。
+        try {
+          await _tts.setVolume(1.0);
+        } catch (_) {}
+      }
+      CrashLog.mark('预热[结束] 未 stop（保持轨道存活）');
+    }
+  }
+
+  /// 若预热还在跑：立刻停掉它并把音量拉回 1.0（`speak()` 提交前调用）
+  Future<void> _abortWarmUpIfNeeded() async {
+    if (!_warmUpInFlight) return;
+    _warmUpInFlight = false;
+    _warmedUp = true;
+    try {
+      await _tts.stop();
+    } catch (_) {}
+    try {
+      await _tts.setVolume(1.0);
+    } catch (_) {}
+  }
+
+
   /// 等引擎完成回调的上限。
   ///
   /// 比 `TtsManager.speakTimeout`（30 秒）略长：让上层先给出**可见**的
@@ -232,6 +347,10 @@ class SystemTtsEngine implements TtsEngine, LocalEngineHost {
   Future<void> speak(String text) async {
     if (_disposed || text.trim().isEmpty) return;
     await initialize();
+
+    // ★v1.22.62 保险①：真正开口前，若预热还在跑 → 停掉它、音量拉满。
+    // 保证**首句永远是满音量**（用户明确要求，不能再出现"声音小"）。
+    await _abortWarmUpIfNeeded();
 
     final done = Completer<void>();
     _pending = done;

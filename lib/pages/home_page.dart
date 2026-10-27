@@ -89,6 +89,56 @@ class HomePage extends StatefulWidget {
     return tts.activeDocumentId;
   }
 
+  /// **当前是否有一场朗读正在进行**（导入后要不要自动打开，看它）
+  ///
+  /// 「进行中」把**暂停**也算进来：暂停时 `TtsManager._speaking` 仍为 true、
+  /// `PdfReadSession.isPlaybackActive` 也仍为 true —— 这正是有意的。
+  /// 暂停中的会话一样会被"打开另一本书"终止（`terminateForDocumentSwitch`），
+  /// 用户回来就续不上了，所以暂停也算忙。
+  @visibleForTesting
+  static bool readingInProgress({
+    required PdfReadSession pdf,
+    required TtsManager tts,
+  }) {
+    return shouldTreatAsReading(
+      ttsSpeaking: tts.speaking,
+      pdfPlaybackActive: pdf.isPlaybackActive,
+    );
+  }
+
+  /// 纯判据（便于单测）：任何一个来源在朗读/暂停中 → 算"忙"
+  @visibleForTesting
+  static bool shouldTreatAsReading({
+    required bool ttsSpeaking,
+    required bool pdfPlaybackActive,
+  }) {
+    return ttsSpeaking || pdfPlaybackActive;
+  }
+
+  /// **导入完成后是否该自动跳进阅读页**（v1.22.61，用户 2026-10-25 拍板方案①）
+  ///
+  /// ## 为什么要有这条
+  ///
+  /// 原来 `_import()` 末尾**无条件** `await _open(stored)` —— 直接跳进新书。
+  /// 而进阅读页会走 `TtsManager.loadDocument()` / `PdfReadSession.open()`，
+  /// 两者的第一步都是 `terminateForDocumentSwitch(新书 id)`，按"换歌"语义
+  /// **终止正在进行的朗读**。于是「朗读中导入一本书」= 朗读被打断，不是偶发。
+  ///
+  /// 用户要求：朗读时导入只**加入文档库**，不要立即打开。
+  ///
+  /// 判据：有朗读在进行 → 不自动打开（只入库 + 提示条给「打开」按钮）；
+  /// 没有朗读 → 保持原来的"导入即打开"，不改既有手感。
+  @visibleForTesting
+  static bool shouldAutoOpenAfterImport({
+    required bool ttsSpeaking,
+    required bool pdfPlaybackActive,
+  }) {
+    return !shouldTreatAsReading(
+      ttsSpeaking: ttsSpeaking,
+      pdfPlaybackActive: pdfPlaybackActive,
+    );
+  }
+
   @override
   State<HomePage> createState() => _HomePageState();
 }
@@ -334,6 +384,63 @@ class _HomePageState extends State<HomePage> {
     // 注意：后面一律用 stored —— 阅读页解析完会把「进度 / 封面」回写文档库，
     // 用旧对象（缓存路径）打开会把刚存好的书库路径覆盖掉
     unawaited(_backfillCover(stored));
+    // ★v1.22.61（用户 2026-10-25 拍板方案①）：**朗读进行中就不要自动打开新书**。
+    //
+    // 进阅读页会 `terminateForDocumentSwitch(新书id)` —— 按"换歌"语义
+    // **终止正在进行的朗读**。所以朗读中导入 = 朗读被打断（确定行为，不是偶发）。
+    //
+    // 用户要求：朗读时导入只加入文档库、不立即打开，避免打断朗读。
+    // 没在朗读时保持原来的"导入即打开"，不动既有手感。
+    if (!HomePage.shouldAutoOpenAfterImport(
+      ttsSpeaking: TtsManager.instance.speaking,
+      pdfPlaybackActive: PdfReadSession.instance.isPlaybackActive,
+    )) {
+      CrashLog.mark('文档库[导入完成] 正在朗读 → 不自动打开 '
+          'ttsSpeaking=${TtsManager.instance.speaking} '
+          'pdfPlayback=${PdfReadSession.instance.isPlaybackActive} '
+          '新书=${stored.id}/${stored.title}');
+      // ★v1.22.61：提示条**必须自己消失**（用户 2026-10-25 明确要求"不要一直显示"）。
+      //
+      // ## ⚠️ 光设 `duration` 不够 —— 真机实证
+      //
+      // 平板实测（联想 TB335FC）：
+      // ```
+      // accessibility_enabled=1
+      // enabled_services=li.songe.gkd/...SelectToSpeakService
+      // ```
+      // 开启无障碍服务后 Flutter 的 `MediaQuery.accessibleNavigation` 为真，
+      // 而 `ScaffoldMessenger` 在那种模式下**直接忽略 `SnackBar.duration`**
+      // （把它当成"需要用户读完/手动关闭"的语义）→ 提示条**永远不消失**。
+      // 这就是用户报的"一直显示"，与时长设 4s 还是 8s 无关。
+      //
+      // 修法：**不依赖 duration**，自己起一个定时器调 `controller.close()`。
+      // 用 controller 而不是 `hideCurrentSnackBar()`，是为了只关掉**这一条** ——
+      // 否则会误关掉 4 秒内新弹出来的其它提示。
+      final messenger = ScaffoldMessenger.of(context);
+      messenger.hideCurrentSnackBar();
+      final controller = messenger.showSnackBar(
+        SnackBar(
+          content: const Text('已加入文档库（正在朗读，未打开）'),
+          duration: const Duration(seconds: 4),
+          action: SnackBarAction(
+            label: '打开',
+            // 用户明确要打开时才跳 —— 此时打断朗读是用户自己的选择
+            onPressed: () => unawaited(_open(stored)),
+          ),
+        ),
+      );
+      // 无障碍模式下 duration 失效 → 用定时器兜底强制收起
+      unawaited(
+        Future<void>.delayed(const Duration(seconds: 4), () {
+          try {
+            controller.close();
+          } catch (_) {
+            // 已经被用户点掉 / 页面已销毁：忽略
+          }
+        }),
+      );
+      return;
+    }
     await _open(stored);
   }
 

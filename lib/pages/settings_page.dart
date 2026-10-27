@@ -535,6 +535,31 @@ class _SettingsPageState extends State<SettingsPage> {
               ),
             ),
           ),
+          const Divider(height: 1),
+          // ★v1.22.62：耳机键兼容模式（静音音轨托底）
+          //
+          // 默认关：多数设备靠 MediaSession 就能收到耳机键，关掉后**完全没有爆音**
+          // （那条静音音轨是爆音的唯一来源）。
+          // 少数系统夺走媒体键归属时才需要打开，代价是首次会"啪"一声。
+          ValueListenableBuilder<bool>(
+            valueListenable: storage.mediaButtonCompat,
+            builder: (BuildContext context, bool compat, Widget? _) {
+              return SwitchListTile(
+                secondary: const Icon(Icons.headphones_outlined),
+                value: compat,
+                title: const Text('耳机键兼容模式（开启会有爆音）'),
+                subtitle: Text(
+                  compat
+                      ? '⚠️ 已开启：耳机键最稳，但每个进程首次朗读时会有一声「啪」。'
+                          '这条静音音轨通电时的瞬态无法消除，只能选择它响在什么时候。'
+                      : '默认关闭：没有任何额外声响。多数设备不开它耳机键也正常。'
+                          '如果耳机键时灵时不灵（尤其被别的音乐打断后失效），'
+                          '再打开它——注意开启后会有爆音。',
+                ),
+                onChanged: (bool v) => unawaited(storage.setMediaButtonCompat(v)),
+              );
+            },
+          ),
         ],
       ),
     );
@@ -1231,6 +1256,23 @@ class _SettingsPageState extends State<SettingsPage> {
             onChanged: (value) async {
               await context.read<TtsManager>().setKeepScreenOn(value);
               if (mounted) setState(() {});
+            },
+          ),
+          // ★v1.22.62：PDF 控制栏展开形态（默认横胶囊，可切换成扇形逐键展开）
+          ValueListenableBuilder<bool>(
+            valueListenable: storage.pdfRadialControl,
+            builder: (BuildContext context, bool radial, Widget? _) {
+              return SwitchListTile(
+                secondary: const Icon(Icons.control_point_duplicate_outlined),
+                value: radial,
+                title: const Text('PDF 控制栏用扇形展开'),
+                subtitle: Text(
+                  radial
+                      ? '当前：扇形 —— 主键不动，其余按键依次弹出'
+                      : '当前：横胶囊（默认）—— 一行图标，MD3 风格',
+                ),
+                onChanged: (bool v) => unawaited(storage.setPdfRadialControl(v)),
+              );
             },
           ),
           const Divider(height: 1),

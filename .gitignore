@@ -35,3 +35,14 @@ Thumbs.db
 # 2026-10-21 它被误打进源码包，让 zip 从 3.9 MB 涨到 190 MB）
 *.hprof
 *.hprof.gz
+
+# 回滚快照（336 MB，只在本机用；恢复方法见 snapshots/ROLLBACK.md）
+# 这些是历史版本的整份源码副本，进仓库会让 clone 变得极慢，
+# 且它们本身可由 CHANGELOG 的版本号 + 发布包重新取回。
+snapshots/
+
+# 开发期临时目录（探针脚本的落盘目录，内容随调试变化）
+probe/
+devall.txt
+viewer.txt
+*.log

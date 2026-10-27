@@ -771,4 +771,74 @@ void main() {
       expect(a.highlightRects.single.top, lessThan(b.highlightRects.single.top));
     });
   });
+
+  // ────────────────────────────────────────────────────────────────────────
+  //  v1.22.61：点空白处不该读同一行（用户 2026-10-25 报的平板现象）
+  //
+  //  **原漏洞**：就近兜底只有"纵向容差"，横向**没有上限** ——
+  //  只要 y 落在某行容差带内，x 在页面最左/最右的页边距也会命中那一行。
+  //  于是"点页面上任意空白处"都会开始朗读同一行，看起来像"点哪都读"。
+  // ────────────────────────────────────────────────────────────────────────
+  group('★命中测试的容差必须有横向上限（点空白不该读同行）', () {
+    /// 一行 5 个汉字（每个 10×12），从 (0,100) 起 → 占 x 0..50 / y 100..112
+    PdfPageTextLayer oneLine() => buildTextLayer(
+          pageNumber: 1,
+          pageSize: const Size(200, 300),
+          fullText: '这一行字。',
+          charRects:
+              makeChars('这一行字。', y: 100).map((c) => c.rect).toList(),
+          segment: segmentIntoSentences,
+        );
+
+    test('★核心：同一行高度、但在很远的右侧空白 → 不命中', () {
+      final layer = oneLine();
+      // y 正在行内（105），x=200 在行右边界 50 之外 150pt
+      expect(layer.sentenceIndexAt(const Offset(200, 105)), isNull,
+          reason: '这就是用户报的"点空白处也能控制同行句子"：'
+              '纵向落在行内 + 横向无上限 → 页边距任意位置都命中');
+    });
+
+    test('★核心：同一行高度、但在左侧页边距（x 负向）→ 不命中', () {
+      final layer = oneLine();
+      expect(layer.sentenceIndexAt(const Offset(-30, 105)), isNull,
+          reason: '左边页边距同理，不该命中');
+    });
+
+    test('行尾右侧**一点点**（约半个字宽）→ 仍然命中（保留手感）', () {
+      final layer = oneLine();
+      // 行右边界 50，点 55 → dx=5 < max(10, 12*1.2=14.4)
+      expect(layer.sentenceIndexAt(const Offset(55, 105)), isNotNull,
+          reason: '点在行尾标点右侧一点点必须能命中，否则又回到"点了没反应"');
+    });
+
+    test('行间缝隙（纵向半个行高内）→ 仍然命中', () {
+      final layer = oneLine();
+      // 行底 112，点 116 → dy=4 < 12*0.55=6.6
+      expect(layer.sentenceIndexAt(const Offset(25, 116)), isNotNull,
+          reason: '两行之间的缝隙要能命中（原有容差的目的）');
+    });
+
+    test('纵向离得太远（超过半行高）→ 不命中', () {
+      final layer = oneLine();
+      expect(layer.sentenceIndexAt(const Offset(25, 130)), isNull,
+          reason: 'dy=18 > 12*0.55=6.6：不该再靠"纵向 0.9 倍行高"的旧容差命中');
+    });
+
+    test('★对照：旧实现（横向无上限）在这些点上会命中 —— 证明用例抓得到 bug', () {
+      // 复现修前逻辑：纵向容差 0.9×行高，横向不设限
+      bool legacyHits(Rect b, Offset p) {
+        final dy = p.dy < b.top
+            ? b.top - p.dy
+            : (p.dy > b.bottom ? p.dy - b.bottom : 0.0);
+        return dy <= b.height * 0.9;
+      }
+
+      const Rect b = Rect.fromLTWH(0, 100, 50, 12);
+      expect(legacyHits(b, const Offset(200, 105)), isTrue,
+          reason: '前提：旧写法在 x=200 处确实会命中（纵向在带内）');
+      final layer = oneLine();
+      expect(layer.sentenceIndexAt(const Offset(200, 105)), isNull,
+          reason: '★修复后必须与旧行为相反，否则这条改动等于没生效');
+    });
+  });
 }

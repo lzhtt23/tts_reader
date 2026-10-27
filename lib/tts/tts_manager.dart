@@ -188,6 +188,34 @@ class TtsManager extends ChangeNotifier implements AudioSessionSource {
 
   TtsEngine get _activeEngine => _engines[_activeId] ?? _engines[_systemId]!;
 
+  /// **引擎音频预热**（v1.22.62，用户批准）：打开文档时用零音量让引擎建好音频轨道
+  ///
+  /// 目的：把外放那声「爆音」提前到**静音、没人注意**的时刻，
+  /// 等用户真正按播放时音频通路已经热了。
+  ///
+  /// ⚠️ 安全约束（用户 2026-10-26 明确「耳机控制最优先」）：
+  /// · **不碰媒体键时序** —— 媒体会话仍由 `TtsAudioHandler` 在 `hasSession` 时立刻建立；
+  /// · **不降低用户听到的音量** —— 预热期间恒为 0，`speak()` 提交前强制拉回 1.0
+  ///   （见 `SystemTtsEngine.warmUpAudioPath` 的两条保险）；
+  /// · **失败静默** —— 预热只是优化，任何异常都不影响朗读。
+  ///
+  /// 只对**系统 TTS** 预热：云端引擎走的是自己的播放器，不受这个冷启动影响。
+  void warmUpAudioPath() {
+    final system = _engines[_systemId];
+    CrashLog.mark('预热[调用] system=${system?.runtimeType} '
+        'isSystem=${system is SystemTtsEngine} '
+        'active=${_activeId == _systemId}');
+    if (system is SystemTtsEngine) {
+      unawaited(system.warmUpAudioPath().catchError((Object e) {
+        CrashLog.mark('预热[异常] $e');
+      }));
+    }
+    // ⚠️ 这里**不要**预建媒体键静音轨（v1.22.62 用户决定）：
+    // 在文档打开时建轨会让"啪"响在安静期，用户明确听到过并反对。
+    // 让它留到**开始朗读**那一刻再建，瞬态会被第一句语音盖住。
+  }
+
+
   void _notify() {
     _updateWakelock();
     _updateAutoSleep();
@@ -526,6 +554,9 @@ class TtsManager extends ChangeNotifier implements AudioSessionSource {
     // 「A 的播放推进 B 的游标」的数据损坏（任务 E 诊断根因③）。
     // 同 id 重进（`documentId` 与当前一致）不会被它打断（§4.60）。
     terminateForDocumentSwitch(nextDocumentId: documentId);
+    // ★v1.22.62：打开文档就把引擎音频通路预热好（零音量，见 warmUpAudioPath）。
+    // 放在这里而不是"开播时"：预热要在用户按播放**之前**完成才有意义。
+    warmUpAudioPath();
     _doc = document;
     _plainMode = false;
     // 换书/重新载入 = 新的一场朗读，清掉「刚结束」标记
@@ -1553,6 +1584,34 @@ class TtsManager extends ChangeNotifier implements AudioSessionSource {
     _borrowedQueue = !claimAudio;
     _lines = items;
     _plainMode = true;
+    // ★v1.22.62 修 P0：**纯文本队列必须置 `_oneShot = true`**（此赋值曾丢失）
+    //
+    // ## 症状（虚拟机可复现，用户真机同现象）
+    // 「分享朗读 / 网页朗读 / 打字朗读」开始朗读后，按耳机暂停，再按播放 →
+    // **会话被销毁**：通知卡片消失，之后再按耳机键完全没反应。
+    //
+    // ## 根因
+    // 上面 `_plainMode = true` 之后没有同步置 `_oneShot`，而 `_oneShot` 全文件
+    // **只有 `= false`**、从没被置真。于是 `resume()` 里那个
+    // `if (_oneShot && _lines.isNotEmpty)` 分支成了**死代码**，
+    // 纯文本会话恢复时必然落到 `_restart()`；而 `_restart()` 第一行就是
+    // `_plainMode = false` → `hasSession` 立刻变 false（纯文本会话的判据是
+    // `_plainMode && _lines.isNotEmpty`）→ 通知栏推 idle → 会话销毁。
+    //
+    // 实证日志（Android 16 虚拟机，test35）：
+    // ```
+    // 恢复[playFromCursor] speaking=true paused=true plainMode=true lines=6 hasDoc=false
+    // 媒体控制[pushState→idle（卡片消失）] hasSession=false playing=true paused=false
+    // ```
+    //
+    // ## 为什么是 `= claimAudio` 而不是恒 true
+    // `claimAudio == false` 是 **PDF 借声**（队列是借来的，`_borrowedQueue` 为真）。
+    // 那种队列不能算作 TtsManager 自己的单向朗读（`hasSession` 由 `_speakForOther`
+    // 单独判定）；置真会让 `resume()` 误用借来的队列重播。
+    //
+    // 与既有注释一致（`_handleEngineCompletion` 上方那段「纯文本队列为了
+    // `resume()` 也把 `_oneShot` 置真」说的就是这里）。
+    _oneShot = claimAudio;
     _lineIndex = start < 0 ? 0 : (start >= items.length ? items.length - 1 : start);
     _generation++;
     _cancelWaitsBelow(++_waitSeq);
@@ -1637,6 +1696,13 @@ class TtsManager extends ChangeNotifier implements AudioSessionSource {
 
   void _restart((int, int, int) at) {
     _plainMode = false;
+    // ★v1.22.62：**进入文档模式必须同时清 `_oneShot`**。
+    //
+    // 否则「纯文本暂停中 → 打开一本书 → 点播放」时，`resume()` 会看到
+    // `_oneShot` 仍为真、`_lines` 还是旧的纯文本队列，于是**重播那段文本**，
+    // 而不是读当前这本书。
+    // 与 `_runLinesBody` 末尾（读完复位）形成对称：纯文本播放期 true、其余时候 false。
+    _oneShot = false;
     // 通知栏切回本来源：PDF 会话在放时用户点了 TXT 的句子 → 通知栏要跟着换。
     // ⚠️ 只在这两个朗读入口调，**绝不能放进 stop()** ——
     // `registerEngine(makeActive: true)` 与换书路径内部都会 stop()，

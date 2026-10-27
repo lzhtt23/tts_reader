@@ -1,5 +1,6 @@
 import 'package:audio_service/audio_service.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:tts_reader/services/device_info.dart';
 import 'package:tts_reader/tts/audio_session_source.dart';
 import 'package:tts_reader/tts/media_interruption.dart';
 import 'package:tts_reader/tts/tts_audio_handler.dart';
@@ -164,6 +165,11 @@ void main() {
   });
 
   test('ColorOS ROM 兼容：正在播时收到 play 当暂停，且状态同步', () async {
+    // ★v1.22.58：该兼容逻辑已限定在 ColorOS 系（见 `DeviceInfo.isColorOsSync`），
+    // 否则联想平板（ZUI）上"按播放"会被当成"暂停"，永远恢复不了。
+    DeviceInfo.debugSetColorOs(true);
+    addTearDown(DeviceInfo.debugReset);
+
     final handler = TtsAudioHandler(TtsManager.instance);
     // ROM 恒发 KEYCODE_MEDIA_PLAY：正在播时这一下其实是"暂停"
     final source = _StubSource(id: 'stub-pdf')..isPlaying = true;

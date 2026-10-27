@@ -218,12 +218,19 @@ class PdfPageTextLayer {
 
   /// 命中测试：PDF 页面坐标 → 句子下标；没命中返回 null
   ///
-  /// 容差：先找「真命中」的字符；找不到就找**纵向距离最近的一行**，
-  /// 只要在 [missToleranceFactor] 倍行高之内也算命中。
+  /// 容差（v1.22.61 收紧，见方法内注释）：
+  /// * 先找「真命中」的字符盒；
+  /// * 找不到就按**单字高度**算容差：纵向 [missToleranceFactor] 倍、横向约 1 个字宽。
   ///
-  /// 为什么要有容差：用户手指点在两行之间、或点在标点右侧的空白处，
+  /// 为什么还要容差：用户手指点在两行之间、或点在行尾标点右侧的空白处，
   /// 严格按包围盒会「点了没反应」——那正是「PDF 点句时灵时不灵」的来源。
-  int? sentenceIndexAt(Offset point, {double missToleranceFactor = 0.9}) {
+  /// 但容差**必须有横向上限**，否则页边距里的任意空白都会命中同一行
+  /// （真机「点空白处也开始朗读」就是这个漏洞）。
+  int? sentenceIndexAt(
+    Offset point, {
+    double missToleranceFactor = 0.55,
+    double maxHorizontalMissFactor = 1.2,
+  }) {
     if (sentences.isEmpty) return null;
 
     // 1) 精确命中：点在某个字符盒里（横向留一点余量，行首行尾好点）
@@ -234,20 +241,45 @@ class PdfPageTextLayer {
       }
     }
 
-    // 2) 纵向就近：找与点最近的行，再取该行里横向最近的那一句
+    // 2) 就近兜底：允许「点在行间缝隙 / 行尾标点右侧一点点」
+    //
+    // ★★ v1.22.61 修「平板 PDF 点空白处也会读同一行」（用户 2026-10-25）
+    //
+    // **原实现的漏洞**：纵向有容差（`b.height * 0.9`），横向**完全没有上限**
+    // —— 于是只要点的 y 落在某一行的容差带内，哪怕 x 在页面最左边的页边距、
+    // 或者最右边的空白，都会命中那一行。用户在页面上点任意空白处（只要与某行同高）
+    // 就会开始朗读，看起来像"点哪都读"。
+    //
+    // 实测形态：PDF 页有很宽的左右页边距，页边距里任意位置都能触发同一行。
+    //
+    // **修法**：横向也加一个**按字高算的**上限（约 1 个字宽），纵向容差收紧到
+    // 半行高左右。这样"行间缝隙 / 标点右侧"仍能命中（原本的容差目的），
+    // 但页边距、行间大空白、段落之间的空白都不再命中。
+    //
+    // ⚠️ 用**单字高度**当标尺而不是 `sentences[i].bounds.height`：
+    // 一句话换行后会跨多行，bounds 是并集，高度可能是单行的好几倍 ——
+    // 拿它算容差会让"多行句"周围的空白全部命中，等于没修。
     double? bestDistance;
     int? bestIndex;
     for (var i = 0; i < sentences.length; i++) {
       final b = sentences[i].bounds;
+      // 单字高度（没有字符盒时退回句子高度）
+      var lineH = 0.0;
+      for (final c in sentences[i].chars) {
+        if (c.rect.height > lineH) lineH = c.rect.height;
+      }
+      if (lineH <= 0) lineH = b.height;
       // 纵向距离（点到行的垂直距离，落在行内记 0）
       final dy = point.dy < b.top
           ? b.top - point.dy
           : (point.dy > b.bottom ? point.dy - b.bottom : 0.0);
-      if (dy > b.height * missToleranceFactor) continue;
+      if (dy > lineH * missToleranceFactor) continue;
       // 横向距离（点到行水平区间的距离，落在区间内记 0）
       final dx = point.dx < b.left
           ? b.left - point.dx
           : (point.dx > b.right ? point.dx - b.right : 0.0);
+      // ★横向上限：最多约 1 个字宽（留给"点行尾标点右侧"的手感）
+      if (dx > math.max(10.0, lineH * maxHorizontalMissFactor)) continue;
       final d = dy * 2 + dx; // 纵向权重更高：优先「同一行」
       if (bestDistance == null || d < bestDistance) {
         bestDistance = d;
