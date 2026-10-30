@@ -1846,8 +1846,23 @@ class TtsManager extends ChangeNotifier implements AudioSessionSource {
       } catch (e) {
         if (token != _generation || !_speaking || _paused) return;
         if (!await _fallbackSpeak(text, engine, token)) {
-          _fail(e);
-          return;
+          // ★v1.22.64 通用兜底：单句读不出来**不应该让整本书停下**
+          //
+          // 用户 2026-10-30：「一个符号读很长时间」。根因是某字符引擎不响应
+          // （实测 `①` U+2460 带圈数字），卡满超时后 `_fail()` 直接终止朗读，
+          // 用户碰到一个符号就再也读不下去。
+          //
+          // 这里改成：**跳过这一句继续读**。判据 [_shouldSkipStuckUnit] 会保证
+          // 只在"引擎健康 + 这句确实短/无实义"时跳，避免把"引擎整体死了"
+          // 误判成"这句有问题"而空转整本书。
+          if (_shouldSkipStuckUnit(text, engine)) {
+            CrashLog.mark('朗读[跳过卡死句] "${text.length > 30 ? '${text.substring(0, 30)}…' : text}"'
+                '（${engine.displayName} 无响应，继续下一句）');
+            _skipStuckUnit(text, engine);
+          } else {
+            _fail(e);
+            return;
+          }
         }
       }
       if (token != _generation || !_speaking || _paused) {
@@ -2134,6 +2149,17 @@ class TtsManager extends ChangeNotifier implements AudioSessionSource {
 
   /// 朗读一个单元：超长文本按句切片依次朗读，仍算作一个单元
   Future<void> _speakUnit(int token, TtsEngine engine, String text) async {
+    // ★v1.22.64 诊断：**把要朗读的文本连同字符类别记下来**。
+    //
+    // 起因（用户 2026-10-30）：「又出现一个符号读很长时间」。
+    // 真机日志只打了「朗读失败：…超时（15000ms）」，**没有文本**，
+    // 于是只能猜是哪个字符卡住 —— 这正是要求「先读日志再动手」时最缺的一环。
+    //
+    // 打三类信息，足够一眼定位：
+    //   · 文本本身（截断到 40 字，避免刷屏）
+    //   · 首个字符的码位与 Unicode 类别（Nl/No/Lo/So… 能看出是哪一类"伪字母数字"）
+    //   · 是否含「可疑可读但引擎常不响应」的字符
+    _logSpeakText(text);
     // 跳动检测（埋点 1a）：只记录，不改判定逻辑
     SpeechDiagnostics.instance.recordSpeakIssued(
       epoch: token,
@@ -2339,6 +2365,62 @@ class TtsManager extends ChangeNotifier implements AudioSessionSource {
     }
   }
 
+  /// 只给测试看：某段原文最终会不会被送去朗读（null = 跳过）
+  @visibleForTesting
+  String? debugSpeakable(String raw) => _speakable(raw);
+
+  /// 单句超时后是否**跳过这句继续读**（v1.22.64 通用兜底）
+  ///
+  /// ## 为什么需要
+  /// 用户 2026-10-30 报「又出现一个符号读很长时间」。实证是 `①`（U+2460）
+  /// 这类排版编号符：引擎读到它**永远不回调完成**，卡满超时后 `_fail()`
+  /// 把整段朗读终止 —— 用户碰到一个符号就再也读不下去，只能手动跳过。
+  ///
+  /// 字符黑名单（[_isTypesettingNumber]）只能挡住**已知**字符；
+  /// 引擎对哪些字符不响应本质上是引擎行为，无法穷举。所以需要一层
+  /// **与字符无关的兜底**：认不出就跳过，别让整本书卡死。
+  ///
+  /// ## 判据（**只跳"不像正文"的单元**，绝不吞掉正常句子）
+  ///
+  /// ⚠️ 第一版判据是「不超过 12 字就跳」，结果把 `_HoldingEngine` 那种
+  /// "故意读不完"的测试引擎也当成可跳 —— 游标被多推进几句，
+  /// `reader_rapid_tap_test` / `reader_features_test` 直接红。
+  ///
+  /// 教训：**"引擎没回应"不能推断出"这句该跳过"**。正常句子读不出来是引擎的
+  /// 问题（该报错让人知道），只有"这句本身几乎不含正文"才值得静默跳过。
+  ///
+  /// 因此收紧为三条同时满足：
+  /// 1. **引擎健康**：连续超时 < 2 次（连续崩走重绑链路）。
+  /// 2. **去掉排版编号符后没有实义字符**，或
+  /// 3. **总长不超过 3 字**（`①`、`· ·`、`一` 这类碎片；
+  ///    正常句子哪怕很短也有主语，3 字以内基本是符号残留）。
+  bool _shouldSkipStuckUnit(String text, TtsEngine engine) {
+    if (_speakTimeouts >= 2) return false;
+    final String trimmed = text.trim();
+    if (trimmed.isEmpty) return true;
+    // 去掉编号符/标点后还剩字母数字 → 这是正文，不跳（该报错）
+    final String core = trimmed
+        .replaceAll(_isTypesettingNumber, '')
+        .replaceAll(RegExp(r'[\s\p{P}\p{S}]', unicode: true), '');
+    if (core.isEmpty) return true;
+    return core.length <= 3;
+  }
+
+  /// 跳过一句卡死的内容：清系统队列、复位超时记账，让下一句能正常起
+  ///
+  /// 与 [_onSpeakTimeout] 的区别：那个是"引擎坏了"的重置链路（会重绑引擎），
+  /// 这个只做最小清理 —— 因为跳过的前提是引擎健康，不需要重绑。
+  void _skipStuckUnit(String text, TtsEngine engine) {
+    // 清系统侧队列：卡住那句的 speakResult 还挂着，不 stop 会吞掉下一句
+    unawaited(_awt(() => engine.stop(), controlTimeout, lock: 'skip-${engine.id}'));
+    // 复位超时记账：这次是"这句读不出"，不是"引擎坏了"
+    _speakTimeouts = 0;
+    // 清掉错误提示：已经跳过继续读了，不该留「朗读失败」吓用户
+    if (_error != null) {
+      _error = null;
+    }
+  }
+
   void _fail(Object error) {
     CrashLog.mark('朗读失败：$error');
     _error = '朗读失败：$error';
@@ -2354,6 +2436,38 @@ class TtsManager extends ChangeNotifier implements AudioSessionSource {
 
   // ---------------- 单元定位与进位 ----------------
 
+  /// 诊断：记录"这一次要朗读什么"（v1.22.64）
+  ///
+  /// 只在发起朗读时各打一行，**不改任何判定逻辑**、不影响朗读。
+  /// 目的见 [_speakUnit] 内的说明：真机日志缺文本时无法定位卡住的字符。
+  void _logSpeakText(String text) {
+    if (text.isEmpty) return;
+    final String preview =
+        text.length <= 40 ? text : '${text.substring(0, 40)}…(${text.length}字)';
+    final int first = text.runes.first;
+    // 首个字符是否是「疑似可读、实则引擎可能不响应」的那一类：
+    // 罗马数字(Nl) / 上标下标等其它数字(No) / 表意数字零 / 叠字符 等
+    final bool suspicious = _suspiciousSpeakChar.hasMatch(text);
+    CrashLog.mark('朗读[发起] 首字符=U+${first.toRadixString(16).toUpperCase()} '
+        '可疑符号=$suspicious 文本="$preview"');
+  }
+
+  /// 「疑似会被送去朗读、但引擎可能完全不响应」的字符集
+  ///
+  /// 这些字符在 Unicode 里**属于字母或数字**（`\p{L}` / `\p{N}`），
+  /// 所以 `_hasMeaningfulChar` 拦不住它们；但很多 TTS 引擎读到它们时不回调完成，
+  /// 表现就是「一个符号读很长时间」直到超时。
+  ///
+  /// 覆盖：
+  /// - `\u2160-\u217F` 罗马数字（Ⅰ Ⅱ Ⅻ ⅰ…，类别 Nl）
+  /// - `\u00B2\u00B3\u00B9\u2070-\u207F` 上标
+  /// - `\u2080-\u209F` 下标
+  /// - `\u3005` 叠字符 々、`\u3006` 封字 〆、`\u3007` 表意数字零 〇
+  static final RegExp _suspiciousSpeakChar = RegExp(
+    r'[\u2160-\u217F\u00B2\u00B3\u00B9\u2070-\u207F\u2080-\u209F\u3005\u3006\u3007]',
+    unicode: true,
+  );
+
   /// 送去合成前套一遍文本预处理规则；处理后为空则返回 null（该单元没有可读内容）
   ///
   /// 只改送进引擎的字符串：阅读页高亮跟着游标走，显示的仍是原文。
@@ -2367,18 +2481,71 @@ class TtsManager extends ChangeNotifier implements AudioSessionSource {
   ///
   /// 判据用「有没有字母/数字」而不是"长度"：`3` 这种单字符数字**照常读**
   /// （日志里 `text="3"` 正常完成 554ms），只把纯标点/纯符号挡掉。
+  ///
+  /// ⚠️ v1.22.64（用户 2026-10-30 真机）：**`①` 这类"排版编号符"必须排除**。
+  ///
+  /// 它们 Unicode 归在 `\p{N}`（No：其它数字）里，所以上面那条判据会放行；
+  /// 但 TTS 引擎读到它们**不回调完成**，表现就是"一个符号读很长时间"。
+  ///
+  /// 实证：书页有一句「批孔就是批周总理，所以都要回避。①」，
+  /// 分句后 `①` 自成一句 → 送去 multitts → **15 秒无响应** → 整段朗读中止：
+  /// ```
+  /// 位置[PDF起读] ref=13/18
+  /// 朗读失败：本地 TTS · multitts 超时（15000ms）
+  /// PDF 朗读中止：…（停在第 13/18 句，位置不推进）
+  /// ```
+  /// 之后反复在同一页重试，用户看到的就是"卡死"。
+  ///
+  /// 这类字符本质是**脚注/列表编号**，读出来也没有意义，直接跳过是对的。
   static final RegExp _hasMeaningfulChar = RegExp(r'[\p{L}\p{N}]', unicode: true);
+
+  /// 「看起来是数字、其实是排版编号符」的字符集（v1.22.64）
+  ///
+  /// 全部属于 `\p{N}`，会被 [_hasMeaningfulChar] 放行，但引擎读不出来。
+  /// 收录范围：
+  /// - `\u2460-\u24FF` 带圈数字 ①-⓿、带括号数字 ⑴-⒇、带点数字 ⒈-⒛
+  /// - `\u2776-\u2793` 实心/空心带圈数字 ❶-❿ ➀-➓
+  /// - `\u3251-\u32BF` 带圈数字 >20（㉑-㊿）
+  /// - `\u2160-\u217F` 罗马数字 Ⅰ-ⅿ（脚注常用，同样读不出）
+  /// - `\u00B2\u00B3\u00B9\u2070-\u207F` 上标数字、`\u2080-\u209F` 下标数字
+  ///
+  /// ⚠️ **不含** `\u3007`（〇）与 `\u3005`（々）：
+  /// 这两个在中文正文里是**真正的字**（"一九〇〇年"、"人々"），必须照常朗读。
+  /// 它们只进 [_suspiciousSpeakChar] 用于打日志。
+  static final RegExp _isTypesettingNumber = RegExp(
+    r'[\u2460-\u24FF\u2776-\u2793\u3251-\u32BF'
+    r'\u2160-\u217F'
+    r'\u00B2\u00B3\u00B9\u2070-\u207F\u2080-\u209F]',
+    unicode: true,
+  );
+
+  /// 去掉排版编号符后，还剩不剩可朗读的内容
+  ///
+  /// 返回 true = 去掉这些符号后仍有字母/数字（即这句有正文），照常朗读；
+  /// 返回 false = 整句只有编号符（如单独的 `①`），跳过。
+  ///
+  /// 注意**只用于判断**，不改送进引擎的原文 ——
+  /// 像「所以都要回避。①」这种句尾挂编号的正常句子，仍然整句照读
+  /// （引擎读到这里会自己略过符号，不会卡；会卡的是**整句只剩符号**）。
+  bool _hasSpeakableContent(String text) {
+    if (!_isTypesettingNumber.hasMatch(text)) {
+      // 没有这类符号，走原判据（零开销快路径）
+      return _hasMeaningfulChar.hasMatch(text);
+    }
+    final String stripped = text.replaceAll(_isTypesettingNumber, '');
+    return _hasMeaningfulChar.hasMatch(stripped);
+  }
 
   String? _speakable(String raw) {
     if (raw.trim().isEmpty) return null;
-    // 没有预处理规则时也要过这一关：纯标点单元直接跳过
+    // 没有预处理规则时也要过这一关：纯标点 / 纯编号符单元直接跳过
     if (!TextProcessor.instance.hasActiveRules) {
-      return _hasMeaningfulChar.hasMatch(raw) ? raw : null;
+      return _hasSpeakableContent(raw) ? raw : null;
     }
     final processed = TextProcessor.instance.apply(raw);
     final trimmed = processed.trim();
     if (trimmed.isEmpty) return null;
-    return _hasMeaningfulChar.hasMatch(trimmed) ? processed : null;
+    return _hasSpeakableContent(trimmed) ? processed : null;
   }
 
   /// 当前游标对应的文本：句 -> 单句，章 -> 整章拼接，页 -> 本页拼接
