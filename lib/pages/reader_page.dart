@@ -4856,15 +4856,6 @@ class _ReaderPageState extends State<ReaderPage> {
             : result.$1);
     final paragraph = result.$2 < 0 ? 0 : result.$2;
 
-    // v1.20.0 行为：目录跳转**直接跳过去并朗读**（不暂停）。
-    // 「跳转时先暂停」是 1.20.9 才加的，用户回退时把它一起去掉了。
-    if (_isPdf && !_pdfTextView) {
-      _jumpToReadingPageFor(chapter);
-    } else {
-      _buildBlocksIfNeeded();
-      // 目录是用户主动跳转：直接落到目标页，不经过「读完本页才翻」的判据
-      unawaited(_revealBlock(_paragraphBlockIndex(chapter, paragraph)));
-    }
     // 用户要求：**朗读时用目录跳转 → 原来那一句暂停，跳到目标页后不自动朗读**。
     //
     // 顺序很重要：
@@ -4873,6 +4864,16 @@ class _ReaderPageState extends State<ReaderPage> {
     // 2. 再把游标挪到目标位置（**不发声**）。这样点播放键就是从目标位置接着读，
     //    而不是从上一次读的那一句开始。
     // 3. 最后定位视图。朗读没有开始，所以不会有「跟着朗读位置往回翻」把页面拉走。
+    //
+    // ★v1.22.65：**这里曾经把「跳到目标页」写了两遍**。
+    //
+    // 第一遍是 v1.20.0「跳转即朗读」留下的（那版不暂停，先跳页再算 wasReading）；
+    // v1.20.9 加「先暂停再跳」时在下半段又写了一遍，上半段没删。后果是**每次
+    // 目录跳转都定位两次**：`_revealBlock` 会 `_takeScrollOwnership` + 递增
+    // `_jumpToken`，第二次调用把第一次尚未走完的定位作废（日志里能看到
+    // 两条 `朗读跟随[定位开始]`，第二条的「落位窗」已经是 true）。
+    // 实测表现为「有概率定位失败 / 跳过去又被拉回来」。
+    // 现在只保留暂停后的一次定位。
     final wasReading = _tts.speaking;
     if (wasReading) unawaited(_tts.pause());
 
@@ -5231,8 +5232,18 @@ class _ReaderPageState extends State<ReaderPage> {
                     ),
                   ],
                 ),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+              // 控制按钮行。
+              //
+              // 原来是 Row + spaceEvenly：按钮**放不下就直接溢出**（用户报的
+              // 「布局溢出」就是这个）。7 个 IconButton 每个宽 48dp，窄屏
+              // （320dp 机型扣掉卡片内边距后只剩 280dp）里 6 个就 288dp，
+              // 超出 8dp —— 实测 `RenderFlex overflowed by 8.0 pixels on the right`。
+              //
+              // 换成 Wrap：放得下时就是一个居中的整行（跟原来视觉一致），
+              // 放不下时自动折成两行，按钮不缩小、不裁切，点得到。
+              Wrap(
+                alignment: WrapAlignment.spaceEvenly,
+                crossAxisAlignment: WrapCrossAlignment.center,
                 children: <Widget>[
                   IconButton.filledTonal(
                     tooltip: '上一句',
