@@ -1,5 +1,33 @@
 # 更新日志
 
+## v1.22.66（2026-11-20）
+
+### 优化：安装包从 47.1 MB 降到 18.0 MB（只出 arm64-v8a）
+
+拆包发现 47.0 MB 里有 **42.5 MB 是原生库**，而且打进了 4 个 CPU 架构：
+
+```
+lib/x86_64      13.54 MB
+lib/arm64-v8a   13.49 MB   ← 目标设备要的只有这个
+lib/armeabi-v7a 13.16 MB
+lib/x86          2.39 MB
+```
+
+现在 release 只保留 `arm64-v8a`，其余三个不再打包，安装包直接少 29 MB。
+
+**改动只在打包范围，代码一行没动**：六个原生库（libapp / libflutter /
+libpdfium / libpdfrx / liblame / libdatastore）与上一版**逐字节相同**。
+
+**限制**：只限 release。debug 仍保留多架构，否则 x86_64 模拟器就跑不起来，
+而设备验证一直依赖模拟器。
+
+实测（一加 Ace / Android 16）：
+- 装包后 `primaryCpuAbi=arm64-v8a`
+- `lib/arm64/` 下六个 .so 齐全
+- 打开 319 页 PDF 正常渲染，无 dlopen / UnsatisfiedLink 错误
+
+出包命令变为：`flutter build apk --release --target-platform android-arm64`
+
 ## v1.22.65（2026-11-19）
 
 ### 修复：窄屏手机上朗读页控制中心溢出 8dp
