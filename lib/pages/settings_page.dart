@@ -16,6 +16,7 @@ import '../services/keep_alive.dart';
 import '../services/speech_diag_export.dart';
 import '../services/speech_diagnostics.dart';
 import '../services/storage_service.dart';
+import '../services/library_backup.dart';
 import '../services/text_processor.dart';
 import '../tts/media_interruption.dart';
 import '../tts/tts_engine.dart';
@@ -196,6 +197,7 @@ class _SettingsPageState extends State<SettingsPage> {
           _c2sCard(),
           _keepAliveCard(),
           _downloadCard(),
+          _backupCard(),
           _speechDiagCard(),
           _bookSourcesCard(),
           _legadoSourcesCard(),
@@ -1549,6 +1551,198 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 
   // ---------------- 下载 ----------------
+
+  /// 书库备份与恢复（v1.22.68）
+  ///
+  /// 为什么单独做一张卡：书存在应用私有目录、记录与进度存在 SharedPreferences，
+  /// **卸载或清数据就全没了**，而此前只有书源/规则能导，书库没有任何出口。
+  ///
+  /// 两个动作都很重（要读写几十~几百 MB），所以：
+  /// · 全程显示进度对话框，结束后给明确结果（含「缺文件的记录」这类如实告知）；
+  /// · 失败一律弹具体原因，不静默。
+  Widget _backupCard() {
+    final TtsManager tts = TtsManager.instance;
+    final bool busy = _backupBusy;
+    return Card.filled(
+      margin: const EdgeInsets.only(bottom: 12),
+      clipBehavior: Clip.antiAlias,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          const ListTile(
+            leading: Icon(Icons.backup_outlined),
+            title: Text('书库备份与恢复'),
+            subtitle: Text(
+              '把书、阅读进度和朗读位置打成一个 zip。'
+              '卸载、清数据或换机前建议先导一份——系统备份对单应用只有 25MB，大书库指望不上。',
+            ),
+          ),
+          const Divider(height: 1),
+          ListTile(
+            leading: const Icon(Icons.save_alt),
+            title: const Text('导出备份'),
+            subtitle: const Text('选择保存文件夹，生成 taohuayuan-library-时间.zip'),
+            enabled: !busy,
+            onTap: busy ? null : () => _exportLibraryBackup(tts),
+          ),
+          ListTile(
+            leading: const Icon(Icons.settings_backup_restore),
+            title: const Text('从备份恢复'),
+            subtitle: const Text('选择 zip 包；同 id 的记录按「进度更新者优先」合并'),
+            enabled: !busy,
+            onTap: busy ? null : () => _importLibraryBackup(tts),
+          ),
+        ],
+      ),
+    );
+  }
+
+  bool _backupBusy = false;
+
+  /// 备份/恢复期间的模态进度框（不可点外关闭：中途取消会留下半个包）
+  void _showBackupProgress(String message) {
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (BuildContext ctx) => PopScope(
+        canPop: false,
+        child: AlertDialog(
+          content: Row(
+            children: <Widget>[
+              const SizedBox(
+                width: 22,
+                height: 22,
+                child: CircularProgressIndicator(strokeWidth: 2.5),
+              ),
+              const SizedBox(width: 16),
+              Expanded(child: Text(message)),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _closeBackupProgress() {
+    final NavigatorState nav = Navigator.of(context, rootNavigator: true);
+    if (nav.canPop()) nav.pop();
+  }
+
+  void _toast(String message) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message), duration: const Duration(seconds: 6)),
+    );
+  }
+
+  /// 简单确认框（返回 false = 用户没确认）
+  Future<bool> _confirm({
+    required String title,
+    required String message,
+    String confirmText = '确定',
+  }) async {
+    final bool? ok = await showDialog<bool>(
+      context: context,
+      builder: (BuildContext ctx) => AlertDialog(
+        title: Text(title),
+        content: Text(message),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: Text(confirmText),
+          ),
+        ],
+      ),
+    );
+    return ok ?? false;
+  }
+
+  /// 导出：选目录 → 打包 → 报告结果
+  Future<void> _exportLibraryBackup(TtsManager tts) async {
+    final String? picked = await FilePicker.platform.getDirectoryPath(
+      dialogTitle: '选择备份保存位置',
+    );
+    if (picked == null) return; // 用户取消，什么都不做
+    if (!mounted) return;
+    setState(() => _backupBusy = true);
+    _showBackupProgress('正在打包书库…');
+    try {
+      final LibraryBackupResult r =
+          await LibraryBackup.exportToDirectory(picked);
+      if (!mounted) return;
+      _closeBackupProgress();
+      final String size = r.bytes >= 1048576
+          ? '${(r.bytes / 1048576).toStringAsFixed(1)} MB'
+          : '${(r.bytes / 1024).toStringAsFixed(0)} KB';
+      final String missing = r.missingFiles.isEmpty
+          ? ''
+          : '\n\n注意：有 ${r.missingFiles.length} 条记录的文件已不在本机，'
+              '只备份了记录本身（书名与进度），恢复后这些书需要重新导入文件。';
+      _toast('已导出 ${r.documentCount} 本书（$size）\n${r.path}$missing');
+    } catch (e) {
+      if (!mounted) return;
+      _closeBackupProgress();
+      _toast('导出失败：$e');
+    } finally {
+      if (mounted) setState(() => _backupBusy = false);
+    }
+  }
+
+  /// 恢复：选包 → 合并 → 报告结果
+  Future<void> _importLibraryBackup(TtsManager tts) async {
+    final FilePickerResult? picked = await FilePicker.platform.pickFiles(
+      dialogTitle: '选择备份包',
+      type: FileType.custom,
+      allowedExtensions: <String>['zip'],
+    );
+    final String? path = picked?.files.single.path;
+    if (path == null) return;
+    if (!mounted) return;
+
+    final bool ok = await _confirm(
+      title: '从备份恢复？',
+      message: '会把备份里的书与进度合并进当前书库：\n'
+          '· 本机没有的书 → 新增\n'
+          '· 备份进度更靠后的 → 用备份的\n'
+          '· 备份更旧或相同 → 保留本机\n\n'
+          '不会删除任何现有书籍。',
+      confirmText: '开始恢复',
+    );
+    if (!ok || !mounted) return;
+
+    setState(() => _backupBusy = true);
+    _showBackupProgress('正在恢复书库…');
+    try {
+      final LibraryRestoreResult r =
+          await LibraryBackup.importFromZip(path);
+      if (!mounted) return;
+      _closeBackupProgress();
+      // 文档库页面每次进入都重新 loadDocuments（无内存缓存），无需额外刷新
+      await tts.stop();
+      final List<String> lines = <String>[
+        '新增 ${r.addedDocuments} 本',
+        if (r.updatedDocuments > 0) '更新进度 ${r.updatedDocuments} 本',
+        if (r.skippedDocuments > 0) '跳过 ${r.skippedDocuments} 本（本机进度不落后）',
+        '写入文件 ${r.filesWritten} 个，复用 ${r.filesReused} 个',
+        if (r.missingFiles > 0) '${r.missingFiles} 条记录在备份里就缺文件',
+        if (r.styleApplied) '已应用备份里的阅读样式（书库为空时才应用）',
+      ];
+      _toast('恢复完成：\n${lines.join('\n')}');
+    } on LibraryBackupException catch (e) {
+      if (!mounted) return;
+      _closeBackupProgress();
+      _toast('恢复失败：${e.message}');
+    } catch (e) {
+      if (!mounted) return;
+      _closeBackupProgress();
+      _toast('恢复失败：$e');
+    } finally {
+      if (mounted) setState(() => _backupBusy = false);
+    }
+  }
 
   /// 下载保存位置：**完整路径 + 🔄 恢复默认 + 📂 选文件夹**
   ///
