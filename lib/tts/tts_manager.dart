@@ -2148,6 +2148,49 @@ class TtsManager extends ChangeNotifier implements AudioSessionSource {
   static const int _minRealSpeakChars = 5;
 
   /// 朗读一个单元：超长文本按句切片依次朗读，仍算作一个单元
+  /// 送合成：**超时先净化重试一次**，仍失败才把异常抛给上层（v1.22.66）
+  ///
+  /// ## 为什么还要这一层
+  /// v1.22.64 用黑名单挡住了 `①` 这类排版编号符，但黑名单只能挡**已知**字符。
+  /// 还有一类没兜住：**长句里混入罕见字**（CJK 扩展 A/B、兼容表意、私用区）——
+  /// 它们在 Unicode 里是 `\p{Lo}`，能通过 [_hasMeaningfulChar]，而很多 TTS 引擎
+  /// 读到它们**不回调完成**，卡满超时。
+  ///
+  /// 此时上层 `_shouldSkipStuckUnit` 因为「去掉符号后仍有一大段正文」不会跳过，
+  /// 直接 `_fail()` → **整段朗读中止**。症状与 `①` 完全一样：
+  /// 读到这里就停，用户只能手动跳过。古籍、OCR 扫描件、异体字多的书都会踩。
+  ///
+  /// ## 做法
+  /// 超时后剥掉这些罕见字符**重发一次**：
+  ///   · 重发成功 → 这一句照常读完（用户只是听不到那几个怪字，正文还在）
+  ///   · 重发也失败 → 原样抛出，交给上层跳过 / 报错
+  ///
+  /// 只影响送进引擎的字符串，**阅读页显示的仍是原文**。
+  Future<void> _speakWithSanitizeRetry(
+    int token,
+    TtsEngine engine,
+    String text,
+  ) async {
+    try {
+      await _speakChunk(engine, text, token);
+      return;
+    } on _SpeakTimeout {
+      final String cleaned = _sanitizeForEngine(text);
+      // 没得净化（本来就没有罕见字符）→ 这就是真的引擎问题，原样抛
+      if (cleaned == text || cleaned.trim().isEmpty) rethrow;
+      if (token != _generation || !_speaking || _paused) rethrow;
+      final int removed = text.length - cleaned.length;
+      CrashLog.mark('朗读[净化重试] 剥离 $removed 字 '
+          '→ "${cleaned.length > 40 ? '${cleaned.substring(0, 40)}…' : cleaned}"');
+      // 卡住那次已经把引擎弄脏了：清队列 + 复位超时记账，再发净化文本
+      unawaited(
+        _awt(() => engine.stop(), controlTimeout, lock: 'sanitize-${engine.id}'),
+      );
+      _speakTimeouts = 0;
+      await _speakChunk(engine, cleaned, token);
+    }
+  }
+
   Future<void> _speakUnit(int token, TtsEngine engine, String text) async {
     // ★v1.22.64 诊断：**把要朗读的文本连同字符类别记下来**。
     //
@@ -2168,14 +2211,14 @@ class TtsManager extends ChangeNotifier implements AudioSessionSource {
     );
     if (text.length <= _maxUtterance) {
       final int startedAtMs = DateTime.now().millisecondsSinceEpoch;
-      await _speakChunk(engine, text, token);
+      await _speakWithSanitizeRetry(token, engine, text);
       _rejectSubmitOnly(engine, text, startedAtMs);
       return;
     }
     for (final chunk in DocumentService.readChunks(text, maxLength: _maxUtterance)) {
       if (token != _generation || !_speaking || _paused) return;
       final int startedAtMs = DateTime.now().millisecondsSinceEpoch;
-      await _speakChunk(engine, chunk, token);
+      await _speakWithSanitizeRetry(token, engine, chunk);
       _rejectSubmitOnly(engine, chunk, startedAtMs);
     }
   }
@@ -2231,7 +2274,7 @@ class TtsManager extends ChangeNotifier implements AudioSessionSource {
     // 令牌仍然有效却失败，说明确实超时且没有抛出（例如等待被取消）
     if (token != _generation) throw const _WaitCancelled();
     _onSpeakTimeout(engine);
-    throw StateError('${engine.displayName} 朗读超时（${budget.inSeconds} 秒无响应）');
+    throw _SpeakTimeout('${engine.displayName} 朗读超时（${budget.inSeconds} 秒无响应）');
   }
 
   /// 单句朗读超时 = 插件已经不回应了，**必须当成「引擎坏了」处理**。
@@ -2368,6 +2411,32 @@ class TtsManager extends ChangeNotifier implements AudioSessionSource {
   /// 只给测试看：某段原文最终会不会被送去朗读（null = 跳过）
   @visibleForTesting
   String? debugSpeakable(String raw) => _speakable(raw);
+
+  /// 只给测试看：罕见字符被剥离后送进引擎的样子
+  @visibleForTesting
+  String debugSanitizeForEngine(String text) => _sanitizeForEngine(text);
+
+  /// 「引擎多半读不出」的罕用字符块（v1.22.66）
+  ///
+  /// 这些字符在 Unicode 里属于字母（`\p{Lo}`）或已收录的表意字，
+  /// 能通过 [_hasMeaningfulChar]，但**很多 TTS 引擎读到它们不回调完成**，
+  /// 表现就是「读到这里卡十几秒」。它们绝大多数是 OCR 噪声或异体字，
+  /// 省略掉不影响听感，却能把整本书从卡死里救回来。
+  ///
+  /// 收录：
+  /// - `\u3400-\u4DBF` CJK 扩展 A
+  /// - `\u{20000}-\u{2FA1F}` CJK 扩展 B 及以后（含兼容补充）
+  /// - `\uF900-\uFAFF` 兼容表意字（康熙部首变体等）
+  /// - `\uE000-\uF8FF` 私用区（字体私有字形，本就没有标准读音）
+  static final RegExp _rareSpeakChar = RegExp(
+    r'[\u3400-\u4DBF\uF900-\uFAFF\uE000-\uF8FF\u{20000}-\u{2FA1F}]',
+    unicode: true,
+  );
+
+  /// 把「引擎读不出」的罕见字符剥掉，供**超时后重试**使用
+  ///
+  /// 只影响送进引擎的字符串，阅读页显示与游标仍按原文走。
+  String _sanitizeForEngine(String text) => text.replaceAll(_rareSpeakChar, '');
 
   /// 单句超时后是否**跳过这句继续读**（v1.22.64 通用兜底）
   ///
@@ -2745,4 +2814,13 @@ class TtsManager extends ChangeNotifier implements AudioSessionSource {
 
   static double _asDouble(Object? value, double fallback) =>
       value is num ? value.toDouble() : fallback;
+}
+
+/// 单句朗读超时（v1.22.66）
+///
+/// 继承 [StateError] 是为了**不破坏既有断言**（多处用例按 `isA<StateError>()`
+/// 和「消息含『朗读超时』」判断）。单独成类只是为了让 [_speakWithSanitizeRetry]
+/// 能用 `on _SpeakTimeout` 精确捕获，不会误伤别的 StateError。
+class _SpeakTimeout extends StateError {
+  _SpeakTimeout(super.message);
 }
