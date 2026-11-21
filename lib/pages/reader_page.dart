@@ -449,6 +449,11 @@ class _ReaderPageState extends State<ReaderPage> {
     // 而 `speakFrom` / 快进 / 点句会立刻改游标，不一定会带来一次重建 ——
     // 漏记就会在「停止（游标被清零）→ 退出 → 重进」后回到开头。
     _tts.addListener(_onCursorMoved);
+    // 词级高亮：引擎每报一个词就重绘一次正文。
+    //
+    // 只重建句子层（TextSpan 有缓存，未变的段落直接命中），
+    // 代价是每词一次 setState —— 实测回调间隔 100~300ms，远低于掉帧阈值。
+    _tts.wordHighlight.addListener(_onWordRangeChanged);
     // §4.100 任务 E：换书时 `TtsManager.loadDocument(别的书)` 会先调这里，
     // 让**本页**把「旧文档停在哪」写回文档库（管理器不知道视图停留位置，
     // 也算不准自动排版后的坐标系，所以写盘交给页面）。
@@ -487,6 +492,12 @@ class _ReaderPageState extends State<ReaderPage> {
   /// 为什么要单独记：`TtsManager.stop()` 会把游标清成 (0,0,0)
   /// （方块键要求「回到刚打开软件的样子」），游标一没，位置就丢了 ——
   /// 用户再进来只能回到开头。
+  /// 词级区间变了：只重绘，不做任何游标/滚动动作
+  void _onWordRangeChanged() {
+    if (!mounted) return;
+    setState(() {});
+  }
+
   void _onCursorMoved() {
     if (_doc == null || !_tts.holdsDocument(widget.document.id)) return;
     final cursor = _tts.cursor;
@@ -509,6 +520,7 @@ class _ReaderPageState extends State<ReaderPage> {
     StorageService.instance.readerStyle.removeListener(_onStyleChanged);
     _pdf.removeListener(_onPdfControllerChanged);
     _tts.removeListener(_onCursorMoved);
+    _tts.wordHighlight.removeListener(_onWordRangeChanged);
     // §4.100 任务 E：注销换书回调（只有还在持有的那本书才需要它）
     if (_tts.onBeforeDocumentSwitch == _persistProgressBeforeSwitch) {
       _tts.onBeforeDocumentSwitch = null;
@@ -1501,6 +1513,21 @@ class _ReaderPageState extends State<ReaderPage> {
   }
 
   /// 按页粒度时，本段是否属于当前朗读页
+  /// 词级高亮区间（v1.22.69）
+  ///
+  /// 只在**正在朗读的那一段**才返回，别的段落一律 null：
+  /// 引擎报的区间是「相对于当前送读的字符串」的，落到别的段落上毫无意义，
+  /// 真出现就会出现「随机一个字被点亮」的怪象。
+  ({int start, int end})? _wordRangeFor(
+    (int, int, int)? cursor,
+    int chapter,
+    int paragraph,
+  ) {
+    if (cursor == null) return null;
+    if (cursor.$1 != chapter || cursor.$2 != paragraph) return null;
+    return _tts.wordHighlight.value;
+  }
+
   bool _pageHighlighted((int, int, int)? cursor, int chapter, int paragraph) {
     final document = _doc;
     if (cursor == null || document == null) return false;
@@ -3099,6 +3126,7 @@ class _ReaderPageState extends State<ReaderPage> {
       paragraph: paragraphs[paragraph],
       activeSentence: _activeSentence(cursor, chapter, paragraph),
       highlighted: _pageHighlighted(cursor, chapter, paragraph),
+      wordRange: _wordRangeFor(cursor, chapter, paragraph),
       style: style,
       // 点句起读：**以点击的句子为优先**
       //
@@ -5665,6 +5693,7 @@ class _ParagraphView extends StatefulWidget {
     required this.onUserTap,
     this.onSentenceSpans,
     this.cursorOnParagraph = false,
+    this.wordRange,
   });
 
   final int chapterIndex;
@@ -5691,6 +5720,11 @@ class _ParagraphView extends StatefulWidget {
 
   /// 朗读游标是否正落在这一段（用例定位「正在读的位置」用）
   final bool cursorOnParagraph;
+
+  /// 当前句里的**词级区间**（v1.22.69）；null = 引擎不报词级，退化为句级高亮
+  ///
+  /// 下标相对于「当前句的文本」，由 `TtsManager.wordHighlight` 转报。
+  final ({int start, int end})? wordRange;
 
   @override
   State<_ParagraphView> createState() => _ParagraphViewState();
@@ -5741,6 +5775,7 @@ class _ParagraphViewState extends State<_ParagraphView> {
     // 而且只在特定主题 / 字号组合下复现，极难查。
     final cacheKey = <Object?>[
       widget.activeSentence,
+      widget.wordRange,
       scheme.brightness,
       identityHashCode(widget.paragraph),
       highlight,
@@ -5757,15 +5792,53 @@ class _ParagraphViewState extends State<_ParagraphView> {
     var at = 0;
     for (var s = 0; s < sentences.length; s++) {
       final text = sentences[s].text;
-      spans.add(
-        TextSpan(
-          text: text,
-          style: widget.activeSentence == s
-              ? TextStyle(backgroundColor: highlight.$1, color: highlight.$2)
-              : null,
-          recognizer: _recognizer(s),
-        ),
-      );
+      final bool isActive = widget.activeSentence == s;
+      final ({int start, int end})? word =
+          isActive ? widget.wordRange : null;
+      if (word == null || word.start >= word.end || word.start >= text.length) {
+        spans.add(
+          TextSpan(
+            text: text,
+            style: isActive
+                ? TextStyle(backgroundColor: highlight.$1, color: highlight.$2)
+                : null,
+            recognizer: _recognizer(s),
+          ),
+        );
+      } else {
+        // 句内三拆：前段（句底色）/ 当前词（强调色）/ 后段（句底色）
+        //
+        // 词区间来自引擎，**必须夹紧**：真机上有引擎给过超出文本长度的 end。
+        final int ws = word.start.clamp(0, text.length);
+        final int we = word.end.clamp(ws, text.length);
+        final TextStyle sentenceStyle =
+            TextStyle(backgroundColor: highlight.$1, color: highlight.$2);
+        if (ws > 0) {
+          spans.add(TextSpan(
+            text: text.substring(0, ws),
+            style: sentenceStyle,
+            recognizer: _recognizer(s),
+          ));
+        }
+        if (we > ws) {
+          spans.add(TextSpan(
+            text: text.substring(ws, we),
+            style: TextStyle(
+              backgroundColor: scheme.primary,
+              color: scheme.onPrimary,
+              fontWeight: FontWeight.w600,
+            ),
+            recognizer: _recognizer(s),
+          ));
+        }
+        if (we < text.length) {
+          spans.add(TextSpan(
+            text: text.substring(we),
+            style: sentenceStyle,
+            recognizer: _recognizer(s),
+          ));
+        }
+      }
       offsets.add((s, at, at + text.length));
       at += text.length;
     }

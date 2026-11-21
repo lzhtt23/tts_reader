@@ -186,6 +186,129 @@ class TtsManager extends ChangeNotifier implements AudioSessionSource {
   (int, int, int)? get highlightCursor =>
       _speaking && !_oneShot && _doc != null ? cursor : null;
 
+  /// 词级高亮区间（v1.22.69）
+  ///
+  /// 由**当前生效引擎**转报：引擎实现 [WordProgressCapable] 就跟着它走，
+  /// 不支持就一直是 null（阅读页自动退化为句级高亮）。
+  ///
+  /// 为什么要 Manager 层再包一层：UI 只监听一个稳定的 notifier，
+  /// 不用关心「现在用的是哪个引擎、它支不支持词级」。
+  final ValueNotifier<({int start, int end})?> wordHighlight =
+      ValueNotifier<({int start, int end})?>(null);
+
+  /// 当前接上的引擎（换引擎时要先摘掉旧的监听）
+  TtsEngine? _wordSource;
+
+  /// 把 [engine] 的词级进度接到 [wordHighlight] 上（不支持则清空）
+  void _bindWordProgress(TtsEngine engine) {
+    if (identical(_wordSource, engine)) return;
+    final TtsEngine? old = _wordSource;
+    // 显式 as：`is` 对「与 TtsEngine 无继承关系」的接口不做类型收窄，
+    // 直接 old.wordRange 会报「getter 不存在 / 可能是 null」。
+    if (old is WordProgressCapable) {
+      (old as WordProgressCapable).wordRange.removeListener(_onWordRange);
+    }
+    _wordSource = engine;
+    if (engine is WordProgressCapable) {
+      final WordProgressCapable w = engine as WordProgressCapable;
+      w.wordRange.addListener(_onWordRange);
+      wordHighlight.value = w.wordRange.value;
+    } else {
+      wordHighlight.value = null;
+    }
+  }
+
+  // ---------------- 词级高亮的「按语速推算」兜底 ----------------
+  //
+  // 为什么需要（v1.22.69 真机实测）：不是所有引擎都报词级。
+  // 这台手机的 ColorOS 自带引擎**一次 onRangeStart 都没有**，
+  // 只靠引擎的话逐词高亮等于没做。
+  //
+  // 做法：开口前起一个 ~80ms 的计时器，按「每秒几个字」推算现在念到哪，
+  // 并让这个速度**自适应**——每句读完后用实测时长校准下一句，
+  // 所以不需要给每种引擎配参数。
+  //
+  // 一旦收到引擎的真实区间就立刻让位（真实永远优先），
+  // 引擎不报时由推算接管。两条路互斥，不会打架。
+  Timer? _wordTimer;
+
+  /// 本句是否收到过**引擎的**词级区间（true 时推算计时器让位）
+  bool _engineWordSeen = false;
+
+  /// 估算语速（字/秒，rate=1.0 时）。实测校准，初值取中文 TTS 常见速度。
+  double _charsPerSecond = 4.2;
+
+  /// 计时器起点与文本
+  DateTime? _wordTimerStart;
+  int _wordTimerLength = 0;
+
+  int get _fallbackStep => 1; // 每次点亮 1 个字，够跟得上
+
+  void _startFallbackWordTimer(String text) {
+    _stopFallbackWordTimer();
+    final int len = text.length;
+    if (len == 0) return;
+    _engineWordSeen = false;
+    _wordTimerLength = len;
+    _wordTimerStart = DateTime.now();
+    _wordTimer = Timer.periodic(const Duration(milliseconds: 80), (Timer t) {
+      if (_engineWordSeen) {
+        t.cancel();
+        return;
+      }
+      final DateTime? started = _wordTimerStart;
+      if (started == null) {
+        t.cancel();
+        return;
+      }
+      final double sec = DateTime.now().difference(started).inMilliseconds / 1000.0;
+      final double cps = (_charsPerSecond * _rate).clamp(0.5, 30.0);
+      final int at = (sec * cps).floor();
+      if (at >= _wordTimerLength) return; // 念完了，等下一句/完成回调
+      final int end = (at + _fallbackStep).clamp(at + 1, _wordTimerLength);
+      wordHighlight.value = (start: at, end: end);
+    });
+  }
+
+  /// 结束计时器，并**用实测时长校准语速**（供下一句使用）
+  void _finishFallbackWordTimer(String text) {
+    final DateTime? started = _wordTimerStart;
+    _wordTimer?.cancel();
+    _wordTimer = null;
+    _wordTimerStart = null;
+    _wordTimerLength = 0;
+    if (started == null || text.isEmpty) return;
+    // 引擎报过词级就不用校准：那时候推算根本不参与
+    if (_engineWordSeen) return;
+    final double sec = DateTime.now().difference(started).inMilliseconds / 1000.0;
+    if (sec < 0.4) return; // 太短（被打断/假完成）不参与校准
+    final double measured = text.length / sec / (_rate <= 0 ? 1.0 : _rate);
+    if (measured < 0.5 || measured > 30) return;
+    // 平滑：一次校准不翻天，几秒内收敛
+    _charsPerSecond = (_charsPerSecond * 0.7 + measured * 0.3).clamp(0.5, 30.0);
+  }
+
+  void _stopFallbackWordTimer() {
+    _wordTimer?.cancel();
+    _wordTimer = null;
+    _wordTimerStart = null;
+    _wordTimerLength = 0;
+  }
+
+  void _onWordRange() {
+    final TtsEngine? src = _wordSource;
+    if (src is WordProgressCapable) {
+      final r = (src as WordProgressCapable).wordRange.value;
+      if (r != null) {
+        // 引擎给了真实区间 → 推算让位，并停表（真实永远优先）
+        _engineWordSeen = true;
+        _wordTimer?.cancel();
+        _wordTimer = null;
+      }
+      wordHighlight.value = r;
+    }
+  }
+
   TtsEngine get _activeEngine => _engines[_activeId] ?? _engines[_systemId]!;
 
   /// **引擎音频预热**（v1.22.62，用户批准）：打开文档时用零音量让引擎建好音频轨道
@@ -423,6 +546,7 @@ class TtsManager extends ChangeNotifier implements AudioSessionSource {
     if (makeActive) {
       await stop();
       _activeId = engine.id;
+      _bindWordProgress(engine);
       _voices = const <TtsVoice>[];
       _notify();
     }
@@ -471,7 +595,9 @@ class TtsManager extends ChangeNotifier implements AudioSessionSource {
     await stop();
     // 切引擎：作废设置记账（新引擎内部状态是干净的，必须重新下发）
     _appliedSetupKey = '';
-    _activeId = id;    _voiceId = ''; // 音色列表随引擎变化
+    _activeId = id;
+    _bindWordProgress(_activeEngine); // 换引擎要重新接词级进度
+    _voiceId = ''; // 音色列表随引擎变化
     _voices = const <TtsVoice>[];
     await _persist();
     _notify();
@@ -1379,6 +1505,9 @@ class TtsManager extends ChangeNotifier implements AudioSessionSource {
     if (_sessionCompleters.isEmpty) return;
     AutoSleepController.instance.notifyUserActivity();
     _generation++;
+    // 暂停：推算计时器必须停（否则暂停后词还在一片片往前跳）
+    _stopFallbackWordTimer();
+    wordHighlight.value = null;
     // 跳动检测（埋点 4）：记录这次打断，以及打断时正飞着的是哪一代
     SpeechDiagnostics.instance.recordInterrupt(
       epoch: _generation,
@@ -1451,6 +1580,9 @@ class TtsManager extends ChangeNotifier implements AudioSessionSource {
   /// （用户报的「第一次打开文档开始朗读、退回文档库迷你条不显示，第二次才显示」）。
   /// 只有用户**明确按下方块键**时才走 [stopByUser]。
   Future<void> stop() async {
+    // 停止：清掉推算计时器与词级高亮
+    _stopFallbackWordTimer();
+    wordHighlight.value = null;
     AutoSleepController.instance.notifyUserActivity();
     _generation++;
     // 跳动检测（埋点 4）：记录这次打断，以及打断时正飞着的是哪一代
@@ -2247,6 +2379,8 @@ class TtsManager extends ChangeNotifier implements AudioSessionSource {
     // （见 [_speakBudgetFor]）。重试不再额外缩短——长度判据本身就是准确的，
     // 真正 wedge 的引擎交给 [_onSpeakTimeout] 的重置链路处理。
     final Duration budget = _speakBudgetFor(chunk);
+    // 推算型词级高亮：开口前起、结束（含超时/失败）后收，并用实测时长校准语速
+    _startFallbackWordTimer(chunk);
     final ok = await _awt(
       () async {
         try {
@@ -2266,6 +2400,7 @@ class TtsManager extends ChangeNotifier implements AudioSessionSource {
       ok: ok,
       cursorAfter: _diagCursorKey(),
     );
+    _finishFallbackWordTimer(chunk);
     if (ok) {
       _speakTimeouts = 0; // 引擎恢复回应：下次照常等 speakTimeout
       return;

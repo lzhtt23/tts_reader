@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 
 import '../services/crash_log.dart';
@@ -8,10 +9,24 @@ import 'tts_engine.dart';
 /// 系统 TTS 引擎（flutter_tts）
 ///
 /// 额外实现 [LocalEngineHost]：设备上装了多个本地 TTS 引擎时可以枚举并切换。
-class SystemTtsEngine implements TtsEngine, LocalEngineHost {
+class SystemTtsEngine implements TtsEngine, LocalEngineHost, WordProgressCapable {
   SystemTtsEngine({String enginePackage = ''}) : _enginePackage = enginePackage.trim();
 
   final FlutterTts _tts = FlutterTts();
+
+  /// 词级进度（v1.22.69）：引擎报「念到第几个字」时更新，供阅读页做逐词高亮。
+  ///
+  /// 语义是「相对于本次送进引擎的字符串」，所以每次 speak 都要清空 ——
+  /// 否则上一句的区间会落到新句子上，看起来像是**随机一个字被点亮**。
+  final ValueNotifier<({int start, int end})?> _wordRange =
+      ValueNotifier<({int start, int end})?>(null);
+
+  @override
+  ValueListenable<({int start, int end})?> get wordRange => _wordRange;
+
+  /// 本句是否已经报过词级（每句只打一条诊断，避免刷屏）
+  bool _wordLogged = false;
+  int _wordCount = 0;
 
   /// 等待当前 speak 结束的凭据
   Completer<void>? _pending;
@@ -110,6 +125,10 @@ class SystemTtsEngine implements TtsEngine, LocalEngineHost {
       _completePending();
       _onComplete?.call();
     });
+    // 词级进度：Android 侧由 UtteranceProgressListener.onRangeStart 回调。
+    // **不是所有引擎都会报**（实测有些本地引擎只给句级），
+    // 所以这里只是「有就用」，绝不把它当成朗读推进的依据。
+    _tts.setProgressHandler(_handleWordProgress);
     _initialized = true;
   }
 
@@ -123,7 +142,49 @@ class SystemTtsEngine implements TtsEngine, LocalEngineHost {
   ///
   /// 打断路径不受影响：`pause()` / `stop()` 自己调 `_completePending()`（此时
   /// `_pending` 已为 null），所以「被打断要尽快放行」的语义原样保留。
+  /// 引擎报词级进度：只做「夹紧 + 落值」，不参与任何朗读控制
+  ///
+  /// 越界一律夹到合理范围：真机上有引擎给过 end 大于文本长度，
+  /// 直接用会让 UI 的 substring 抛异常。
+  void _handleWordProgress(
+    String text,
+    int startOffset,
+    int endOffset,
+    String word,
+  ) {
+    if (_disposed) return;
+    final int len = text.length;
+    if (len <= 0) return;
+    final int start = startOffset.clamp(0, len);
+    final int end = endOffset.clamp(start, len);
+    if (start == end) return;
+    _wordRange.value = (start: start, end: end);
+    _wordCount++;
+    if (!_wordLogged) {
+      _wordLogged = true;
+      // 只打第一条：能确认「这个引擎报不报词级」，又不会每读一个字刷一行
+      CrashLog.mark('朗读[词级] 引擎上报区间 $start..$end '
+          '词="${word.length > 8 ? '${word.substring(0, 8)}…' : word}"');
+    }
+  }
+
+  /// 清掉词级进度（换句 / 停 / 暂停时都要清，否则会残留上一句的区间）
+  void _clearWordRange() {
+    if (_wordRange.value != null) _wordRange.value = null;
+    _wordLogged = false;
+    _wordCount = 0;
+  }
+
+  /// 句末确认：这一句引擎到底报没报过词级（用于判断能否做逐词高亮）
+  void _reportWordSupportOnce() {
+    if (_wordCount > 0) return;
+    if (_wordLogged) return;
+    _wordLogged = true; // 每句只报一次
+    CrashLog.mark('朗读[词级] 本句无词级回调（引擎不支持，界面退化为句级高亮）');
+  }
+
   void _handleFinished() {
+    _reportWordSupportOnce();
     final DateTime? issuedAt = _speakIssuedAt;
     if (issuedAt != null &&
         _pending != null &&
@@ -355,6 +416,7 @@ class SystemTtsEngine implements TtsEngine, LocalEngineHost {
     final done = Completer<void>();
     _pending = done;
     _fakeCompleteDrops = 0;
+    _clearWordRange(); // 新的一句：上一句的词区间必须作废
     // 本次朗读的代次：之后的 stop() / pause() / 新 speak() 都会让它失效
     final int myGeneration = ++_generation;
     int attempts = 0;
@@ -429,6 +491,7 @@ class SystemTtsEngine implements TtsEngine, LocalEngineHost {
   Future<void> pause() async {
     _generation++; // 作废在飞的重投：暂停之后不该再有旧文本被提交
     _completePending(); // 唤醒上层循环，游标保持在当前单元
+    _clearWordRange(); // 暂停后不该还亮着某个词
     try {
       await _tts.pause();
     } catch (_) {
@@ -438,6 +501,7 @@ class SystemTtsEngine implements TtsEngine, LocalEngineHost {
 
   @override
   Future<void> stop() async {
+    _clearWordRange(); // 停止后清掉词级高亮，避免停在半句上
     // ★作废在飞的重投（v1.21.54）：切书 / 停止之后，任何**旧的**文本
     // 都不能再被提交给系统 —— 否则用户会听到"读回上一本书"。
     // 只递增代次是不够的，还要让 `_tts.stop()` 把系统侧队列也清掉。

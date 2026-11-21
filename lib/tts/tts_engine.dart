@@ -1,3 +1,5 @@
+import 'package:flutter/foundation.dart';
+
 /// 语音（系统引擎由平台提供，云端引擎为内置音色表）
 class TtsVoice {
   const TtsVoice({required this.id, required this.name, required this.locale});
@@ -101,6 +103,19 @@ class LocalTtsEngine {
 mixin SyntheticTtsEngine {
   /// 本引擎的完成回调不表示「真实朗读结束」。
   bool get syntheticCompletion => true;
+}
+
+/// **可选能力**：引擎能报「当前念到第几个字」（v1.22.69）
+///
+/// 为什么不直接塞进 [TtsEngine]：那会让所有测试替身跟着实现一遍，
+/// 而绝大多数替身根本不关心词级进度。做成独立接口，谁支持谁实现，
+/// UI 侧用 `engine is WordProgressCapable` 探测，**不支持就退化为句级高亮**。
+///
+/// 区间是**相对于这一次送进引擎的字符串**的字符下标（含头不含尾），
+/// 与 flutter_tts 的 `onRangeStart(text, start, end, word)` 一致。
+abstract class WordProgressCapable {
+  /// 当前词区间；null 表示「没有词级信息」（未开始 / 已停止 / 引擎不报）
+  ValueListenable<({int start, int end})?> get wordRange;
 }
 
 /// TTS 引擎统一抽象：系统引擎与云端引擎共用同一套朗读调度
