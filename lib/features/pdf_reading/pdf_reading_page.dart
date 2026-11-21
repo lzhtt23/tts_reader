@@ -46,6 +46,7 @@ class PdfReadingPage extends StatefulWidget {
     required this.title,
     this.documentId,
     this.debugShowTextRects = false,
+    this.autoSpeak = false,
   });
 
   final String filePath;
@@ -56,6 +57,12 @@ class PdfReadingPage extends StatefulWidget {
 
   /// 打开后画出每个字符盒（排查命中问题用）
   final bool debugShowTextRects;
+
+  /// 打开后直接继续朗读（文档库「继续朗读」卡，v1.22.76）
+  ///
+  /// 依赖会话已经把上次的位置恢复出来；恢复不出来时 `resume()` 自己会安全返回，
+  /// 不会凭空读错位置。
+  final bool autoSpeak;
 
   /// 供测试 / 外部定位用的 Key
   static const Key viewKey = ValueKey<String>('pdf-reading-view');
@@ -945,6 +952,19 @@ class PdfReadingPageState extends State<PdfReadingPage>
           ..clear()
           ..addAll(List<double>.filled(pageCount, 0));
       });
+      // 「继续朗读」进来：位置恢复完后接着读（v1.22.76）
+      if (widget.autoSpeak) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          final session = _session;
+          if (!session.isActive) {
+            CrashLog.mark('PDF[进入即读] 会话未就绪，跳过自动朗读');
+            return;
+          }
+          CrashLog.mark('PDF[进入即读] resume');
+          session.resume();
+        });
+      }
       // 闸门补上真实页数（initState 时文档还没打开，只能给 0；
       // pageCount<=0 会把每一次滚动请求静默吞掉 —— §4.100 任务 C），
       // 并按会话已有位置认下初始页（重进时「已在目标页」不该再翻一次）。

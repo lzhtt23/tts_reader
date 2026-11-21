@@ -54,6 +54,15 @@ class HomePage extends StatefulWidget {
   /// 2026-10-18 起导入从右下角悬浮按钮挪到搜索行旁边：控制栏展开时会向
   /// 左铺开，原来的悬浮按钮会被挤走；放这里位置固定，也不挡列表最后几本。
   /// 用例统一用这个 key 找它（别再按 `FloatingActionButton` + 文字找）。
+  /// 「更多」菜单（v1.22.76）
+  static const Key moreMenuKey = ValueKey<String>('home-more-menu');
+
+  /// 文档库「显示」选择器（列表 / 2 列 / 3 列）
+  static const Key layoutSelectorKey = ValueKey<String>('home-layout-selector');
+
+  /// 「继续朗读」卡
+  static const Key resumeCardKey = ValueKey<String>('home-resume-card');
+
   static const Key importButtonKey = ValueKey<String>('library-import');
 
   /// 书架分类栏（本地 / 在线）
@@ -482,6 +491,15 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
+  /// 打开并**直接开读**（文档库「继续朗读」卡的播放键，v1.22.76）
+  Future<void> _openAndSpeak(Document document) async {
+    final NavigatorState navigator = Navigator.of(context);
+    await navigator.push(MaterialPageRoute<void>(
+      builder: (_) => openReadingScreen(document, autoSpeak: true),
+    ));
+    await _load();
+  }
+
   Future<void> _open(Document document) async {
     final navigator = Navigator.of(context);
     await navigator.push(MaterialPageRoute<void>(
@@ -657,32 +675,85 @@ class _HomePageState extends State<HomePage> {
         }),
         actions: <Widget>[
           if (_index == _kLibrary) ...<Widget>[
-            // 打字朗读入口
-            IconButton(
-              tooltip: '打字朗读',
-              onPressed: _openTypeSpeak,
-              icon: const Icon(Icons.record_voice_over_outlined),
-            ),
-            // 剪贴板朗读入口
-            IconButton(
-              tooltip: '朗读剪贴板',
-              onPressed: _speakClipboard,
-              icon: const Icon(Icons.content_paste_go),
-            ),
-            IconButton(
-              tooltip: '排序：${_sort.label}',
-              onPressed: () => setState(() => _sort = _sort.next),
-              icon: Icon(_sort.icon),
-            ),
-            IconButton(
-              tooltip: '局域网传书',
-              onPressed: _openLanUpload,
-              icon: const Icon(Icons.wifi_tethering),
-            ),
-            IconButton(
-              tooltip: '刷新',
-              onPressed: _load,
-              icon: const Icon(Icons.refresh),
+            // ★v1.22.76：顶栏从 5 个图标收敛到 2 个（用户 2026-11-22 确认）
+            //
+            // 原来打字朗读 / 剪贴板 / 排序 / 局域网 / 刷新 五个并列摆在标题右边，
+            // 一级界面上一排图标，主次不分。现在只留「导入」和「更多」，
+            // 其余进菜单 —— 功能一个不少，只是收起来。
+            // 空库时中央已有「导入文件」引导按钮，顶栏不必再来一个
+            if (_documents.isNotEmpty)
+              IconButton(
+                key: HomePage.importButtonKey,
+                tooltip: '导入文件',
+                onPressed: _import,
+                icon: const Icon(Icons.add),
+              ),
+            PopupMenuButton<String>(
+              key: HomePage.moreMenuKey,
+              tooltip: '更多',
+              icon: const Icon(Icons.more_vert),
+              onSelected: (String value) {
+                switch (value) {
+                  case 'type':
+                    _openTypeSpeak();
+                  case 'clipboard':
+                    _speakClipboard();
+                  case 'lan':
+                    _openLanUpload();
+                  case 'sort':
+                    setState(() => _sort = _sort.next);
+                  case 'refresh':
+                    _load();
+                }
+              },
+              itemBuilder: (BuildContext context) => <PopupMenuEntry<String>>[
+                const PopupMenuItem<String>(
+                  value: 'type',
+                  child: ListTile(
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    leading: Icon(Icons.record_voice_over_outlined),
+                    title: Text('打字朗读'),
+                  ),
+                ),
+                const PopupMenuItem<String>(
+                  value: 'clipboard',
+                  child: ListTile(
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    leading: Icon(Icons.content_paste_go),
+                    title: Text('朗读剪贴板'),
+                  ),
+                ),
+                const PopupMenuItem<String>(
+                  value: 'lan',
+                  child: ListTile(
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    leading: Icon(Icons.wifi_tethering),
+                    title: Text('局域网传书'),
+                  ),
+                ),
+                const PopupMenuDivider(),
+                PopupMenuItem<String>(
+                  value: 'sort',
+                  child: ListTile(
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    leading: Icon(_sort.icon),
+                    title: Text('排序：${_sort.label}'),
+                  ),
+                ),
+                const PopupMenuItem<String>(
+                  value: 'refresh',
+                  child: ListTile(
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    leading: Icon(Icons.refresh),
+                    title: Text('刷新'),
+                  ),
+                ),
+              ],
             ),
           ],
         ],
@@ -818,7 +889,6 @@ class _HomePageState extends State<HomePage> {
       );
     }
     final documents = _visible;
-    final columns = libraryColumns(context);
     // 搜索栏固定在列表上方（滚动时不跟着走），空库时不显示
     return Column(
       children: <Widget>[
@@ -826,28 +896,7 @@ class _HomePageState extends State<HomePage> {
         _shelfTabBar(),
         Expanded(
           child: _shelfTab == 0
-              ? (documents.isEmpty
-                    ? _noMatchView()
-                    : columns > 1
-                    // 平板 / 横屏：文档库改成多列网格，一屏能看更多书
-                    ? GridView.builder(
-                        padding: const EdgeInsets.fromLTRB(12, 4, 12, 96),
-                        gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                          crossAxisCount: columns,
-                          crossAxisSpacing: 8,
-                          mainAxisSpacing: 8,
-                          mainAxisExtent: 112,
-                        ),
-                        itemCount: documents.length,
-                        itemBuilder: (context, index) =>
-                            _documentCard(documents[index]),
-                      )
-                    : ListView.builder(
-                        padding: const EdgeInsets.fromLTRB(12, 4, 12, 96),
-                        itemCount: documents.length,
-                        itemBuilder: (context, index) =>
-                            _documentCard(documents[index]),
-                      ))
+              ? (documents.isEmpty ? _noMatchView() : _libraryList(documents))
               : _onlineShelfView(),
         ),
       ],
@@ -1165,23 +1214,8 @@ class _HomePageState extends State<HomePage> {
               style: theme.textTheme.bodyMedium,
             ),
           ),
-          const SizedBox(width: 10),
-          SizedBox(
-            width: 56,
-            height: 56,
-            child: IconButton.filledTonal(
-              key: HomePage.importButtonKey,
-              tooltip: '导入文件',
-              onPressed: _import,
-              iconSize: 26,
-              icon: const Icon(Icons.add),
-              style: IconButton.styleFrom(
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(16),
-                ),
-              ),
-            ),
-          ),
+          // v1.22.76：这里原来有个大「+」导入按钮，顶栏现在也有了 ——
+          // 两个并排重复。导入入口统一收到顶栏（见 AppBar 的 actions）。
         ],
       ),
     );
@@ -1214,92 +1248,357 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  Widget _documentCard(Document document) {
-    final theme = Theme.of(context);
-    final scheme = theme.colorScheme;
-    final (IconData icon, Color color) = switch (document.type) {
-      DocumentType.pdf => (Icons.picture_as_pdf, scheme.error),
-      DocumentType.epub => (Icons.menu_book, scheme.primary),
-      DocumentType.txt => (Icons.description, scheme.tertiary),
-    };
-    return Card.filled(
-      margin: const EdgeInsets.only(bottom: 12),
-      clipBehavior: Clip.antiAlias,
-      child: InkWell(
-        onTap: () => _open(document),
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(12, 10, 4, 10),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: <Widget>[
-              // 封面：EPUB 用抽取出的图片，其它类型用类型色占位封面
-              _cover(document, icon, color),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: <Widget>[
-                    Text(
-                      document.title,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style: theme.textTheme.titleMedium,
-                    ),
-                    const SizedBox(height: 4),
-                    Row(
-                      children: <Widget>[
-                        Flexible(
-                          child: Text(
-                            '${document.type.label} · 进度 ${(document.progress * 100).round()}%',
-                            style: theme.textTheme.bodySmall,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ),
-                        if (document.lastReadAt != null) ...<Widget>[
-                          const SizedBox(width: 8),
-                          Text(
-                            '上次 ${_relativeTime(document.lastReadAt!)}',
-                            style: theme.textTheme.labelSmall?.copyWith(
-                              color: scheme.onSurfaceVariant,
-                            ),
-                          ),
-                        ],
-                        if (document.hasTextLayer == false) ...<Widget>[
-                          const SizedBox(width: 8),
-                          // 扫描件：没有文本层，朗读不出内容
-                          Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
-                            decoration: BoxDecoration(
-                              color: scheme.errorContainer,
-                              borderRadius: BorderRadius.circular(4),
-                            ),
-                            child: Text(
-                              '无文本层',
-                              style: theme.textTheme.labelSmall?.copyWith(
-                                color: scheme.onErrorContainer,
-                              ),
-                            ),
-                          ),
-                        ],
-                      ],
-                    ),
-                    const SizedBox(height: 8),
-                    ClipRRect(
-                      borderRadius: BorderRadius.circular(4),
-                      child: LinearProgressIndicator(value: document.progress, minHeight: 4),
-                    ),
-                  ],
+  /// 当前该用几列（v1.22.76）
+  ///
+  /// 顺序：用户手选 > 按宽度自动。
+  /// 自动档的断点是按「一列至少 150dp 才看得清封面」定的：
+  /// 600 以下单列、600~840 三列、840~1100 四列、再宽五列。
+  int _resolveColumns(BuildContext context) {
+    final String pref = StorageService.instance.libraryLayout.value;
+    if (pref == 'list') return 1;
+    if (pref == 'c2') return 2;
+    if (pref == 'c3') return 3;
+    final double w = MediaQuery.sizeOf(context).width;
+    if (w >= 1100) return 5;
+    if (w >= 840) return 4;
+    if (w >= 600) return 3;
+    return 1;
+  }
+
+  /// 文档库列表：继续朗读卡 + 显示选择器 + 书列表/网格（v1.22.76）
+  ///
+  /// 用一个 `CustomScrollView` 把三块串起来：顶部两块是"头"，后面才是书。
+  /// 这样滚动时头会跟着走，书多了不会把它们钉死在上面。
+  Widget _libraryList(List<Document> documents) {
+    // 监听显示方式：用户点「2 列 / 3 列」时 `setLibraryLayout` 只改 notifier，
+    // 不监听的话值变了界面不重建（点了没反应）；auto 跟随宽度变化也靠这里。
+    return ValueListenableBuilder<String>(
+      valueListenable: StorageService.instance.libraryLayout,
+      builder: (BuildContext context, String _, Widget? __) {
+        return LayoutBuilder(
+      builder: (BuildContext context, BoxConstraints constraints) {
+        final int columns = _resolveColumns(context);
+        // 网格单元尺寸：宽度均分，高度 = 封面(3:4) + 书名两行 + 进度条
+        const double hPad = 12;
+        const double gap = 12;
+        final double cellW =
+            (constraints.maxWidth - hPad * 2 - gap * (columns - 1)) / columns;
+        final double cellH = cellW * 4 / 3 + 58;
+
+        return CustomScrollView(
+          slivers: <Widget>[
+            // 搜索中不显示「继续朗读」：它会显示一本**不匹配关键字**的书，
+            // 与"过滤后只看到相关书"的预期冲突（用例也据此判定过滤生效）。
+            if (_search.text.trim().isEmpty)
+              SliverToBoxAdapter(child: _resumeCard()),
+            SliverToBoxAdapter(child: _layoutSelector(columns, documents.length)),
+            if (columns == 1)
+              SliverPadding(
+                padding: const EdgeInsets.fromLTRB(hPad, 0, hPad, 96),
+                sliver: SliverList.builder(
+                  itemCount: documents.length,
+                  itemBuilder: (BuildContext context, int index) =>
+                      _listRow(documents[index]),
+                ),
+              )
+            else
+              SliverPadding(
+                padding: const EdgeInsets.fromLTRB(hPad, 0, hPad, 96),
+                sliver: SliverGrid.builder(
+                  gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                    crossAxisCount: columns,
+                    crossAxisSpacing: gap,
+                    mainAxisSpacing: 14,
+                    mainAxisExtent: cellH,
+                  ),
+                  itemCount: documents.length,
+                  itemBuilder: (BuildContext context, int index) =>
+                      _gridCard(documents[index]),
                 ),
               ),
-              IconButton(
-                tooltip: '删除',
-                onPressed: () => _delete(document),
-                icon: const Icon(Icons.delete_outline),
-              ),
-            ],
+          ],
+        );
+      },
+    );
+      },
+    );
+  }
+
+  /// 「继续朗读」卡：最近读过、且没读完的那本（v1.22.76）
+  ///
+  /// 为什么值得占首屏一块：文档库最高频的动作就是「接着上次读」，
+  /// 而书一多就得靠找。没有符合条件的书时整块不渲染（不占位）。
+  Widget _resumeCard() {
+    Document? target;
+    for (final Document d in _documents) {
+      if (d.lastReadAt == null) continue;
+      if ((target == null) || d.lastReadAt!.isAfter(target.lastReadAt!)) {
+        target = d;
+      }
+    }
+    if (target == null) return const SizedBox.shrink();
+    final Document doc = target;
+    final ThemeData theme = Theme.of(context);
+    final ColorScheme scheme = theme.colorScheme;
+    final int pct = (doc.progress * 100).round();
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 4, 12, 12),
+      child: Material(
+        key: HomePage.resumeCardKey,
+        color: scheme.surfaceContainerLow,
+        borderRadius: BorderRadius.circular(18),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: () => _open(doc),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+            child: Row(
+              children: <Widget>[
+                _cover(doc, width: 44, height: 58),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: <Widget>[
+                      Text(
+                        doc.title,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: theme.textTheme.titleSmall
+                            ?.copyWith(fontWeight: FontWeight.w600),
+                      ),
+                      const SizedBox(height: 3),
+                      Text(
+                        // 进度 0 的书说"上次读到"别扭（其实还没读）——按实际状态换措辞
+                        '${pct == 0 ? '上次打开' : '上次读到 · 进度 $pct%'}'
+                        ' · ${_relativeTime(doc.lastReadAt!)}',
+                        style: theme.textTheme.bodySmall
+                            ?.copyWith(color: scheme.onSurfaceVariant),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 8),
+                // 直接开读：相当于"点开这本书并开始朗读"
+                IconButton.filled(
+                  tooltip: '继续朗读',
+                  onPressed: () => _openAndSpeak(doc),
+                  icon: const Icon(Icons.play_arrow),
+                ),
+              ],
+            ),
           ),
         ),
       ),
+    );
+  }
+
+  /// 显示方式选择器：列表 / 2 列 / 3 列（v1.22.76）
+  ///
+  /// ⚠️ 用 `Wrap` 不用 `Row`：320dp 窄屏上「显示」+ 三个胶囊 + 本数放不下，
+  /// `Row` 直接溢出（窄屏巡检用例会红）。Wrap 放不下就折行，不挤。
+  Widget _layoutSelector(int current, int count) {
+    final ThemeData theme = Theme.of(context);
+    Widget chip(String label, String value, IconData icon, bool selected) {
+      return Padding(
+        padding: const EdgeInsets.only(right: 6, bottom: 4),
+        child: ChoiceChip(
+          label: Text(label),
+          avatar: Icon(icon, size: 15),
+          selected: selected,
+          showCheckmark: false,
+          visualDensity: VisualDensity.compact,
+          onSelected: (_) =>
+              StorageService.instance.setLibraryLayout(value),
+        ),
+      );
+    }
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 0, 12, 4),
+      child: Wrap(
+        key: HomePage.layoutSelectorKey,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        children: <Widget>[
+          Padding(
+            padding: const EdgeInsets.only(right: 10, bottom: 4),
+            child: Text('显示', style: theme.textTheme.labelMedium),
+          ),
+          // 高亮看**实际生效**的列数，不看存的值：auto 时存的是 'auto'，
+          // 但用户看到的是某一列，那个就得亮起来（否则三个都不亮，像没选中）。
+          chip('列表', 'list', Icons.view_list_outlined, current == 1),
+          chip('2 列', 'c2', Icons.view_column_outlined, current == 2),
+          chip('3 列', 'c3', Icons.grid_view_outlined, current == 3),
+          Padding(
+            padding: const EdgeInsets.only(bottom: 4),
+            child: Text(
+              '$count 本',
+              style: theme.textTheme.labelSmall
+                  ?.copyWith(color: theme.colorScheme.outline),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 单列行（默认形态）
+  Widget _listRow(Document document) {
+    final ThemeData theme = Theme.of(context);
+    final ColorScheme scheme = theme.colorScheme;
+    final int pct = (document.progress * 100).round();
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Material(
+        color: scheme.surfaceContainerLow,
+        borderRadius: BorderRadius.circular(16),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: () => _open(document),
+          // 删除原来是一个常驻按钮（占地方、又容易误点），改成**长按**：
+          // 想删的人会去长按，只想读的人不会被一个垃圾桶一直杵在右边打扰。
+          onLongPress: () => _delete(document),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(11, 9, 8, 9),
+            child: Row(
+              children: <Widget>[
+                _cover(document, width: 50, height: 66),
+                const SizedBox(width: 11),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: <Widget>[
+                      SizedBox(
+                        height: 34,
+                        child: Text(
+                          document.title,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: theme.textTheme.bodyMedium?.copyWith(
+                            fontWeight: FontWeight.w600,
+                            height: 1.26,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        '${document.type.label} · 进度 $pct%'
+                        '${document.lastReadAt == null ? '' : ' · ${_relativeTime(document.lastReadAt!)}'}',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: theme.textTheme.labelSmall
+                            ?.copyWith(color: scheme.onSurfaceVariant),
+                      ),
+                      const SizedBox(height: 5),
+                      Row(
+                        children: <Widget>[
+                          Expanded(
+                            child: ClipRRect(
+                              borderRadius: BorderRadius.circular(2),
+                              child: LinearProgressIndicator(
+                                value: document.progress,
+                                minHeight: 3,
+                                backgroundColor: scheme.outlineVariant,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 7),
+                          Text(
+                            '$pct%',
+                            style: theme.textTheme.labelSmall?.copyWith(
+                              color: scheme.onSurfaceVariant,
+                              fontFeatures: const <FontFeature>[
+                                FontFeature.tabularFigures(),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+                Icon(Icons.chevron_right, color: scheme.outline),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 网格单元（2 列 / 3 列 / 平板多列）
+  Widget _gridCard(Document document) {
+    final ThemeData theme = Theme.of(context);
+    final ColorScheme scheme = theme.colorScheme;
+    final int pct = (document.progress * 100).round();
+    return LayoutBuilder(
+      builder: (BuildContext context, BoxConstraints constraints) {
+        final double w = constraints.maxWidth;
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            // 封面占满宽度，按 3:4 撑高（与预览一致）
+            Expanded(
+              child: GestureDetector(
+                onTap: () => _open(document),
+                onLongPress: () => _delete(document),
+                child: _cover(document, width: w, height: w * 4 / 3, radius: 9),
+              ),
+            ),
+            const SizedBox(height: 7),
+            GestureDetector(
+              onTap: () => _open(document),
+              onLongPress: () => _delete(document),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: <Widget>[
+                  SizedBox(
+                    height: 30,
+                    child: Text(
+                      document.title,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.textTheme.labelMedium?.copyWith(
+                        fontWeight: FontWeight.w600,
+                        height: 1.26,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Row(
+                    children: <Widget>[
+                      Expanded(
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(2),
+                          child: LinearProgressIndicator(
+                            value: document.progress,
+                            minHeight: 3,
+                            backgroundColor: scheme.outlineVariant,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 5),
+                      Text(
+                        '$pct%',
+                        style: theme.textTheme.labelSmall?.copyWith(
+                          fontSize: 9,
+                          color: scheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ],
+        );
+      },
     );
   }
 
@@ -1314,35 +1613,115 @@ class _HomePageState extends State<HomePage> {
         '${time.day.toString().padLeft(2, '0')}';
   }
 
-  Widget _cover(Document document, IconData icon, Color color) {
-    const width = 52.0;
-    const height = 72.0;
-    final path = document.coverPath;
-    final placeholder = Container(
+  /// 封面（v1.22.76 重写）
+  ///
+  /// 有抽出来的封面图就用图；没有就**画一本书**：渐变底 + 竖排书名 + 书脊阴影。
+  /// 原来无图时是"类型色块 + 图标"，在书架里看着像占位符；而 PDF/TXT 大多没有
+  /// 封面图，等于整个书架的观感都由占位符决定。
+  ///
+  /// 底色按 [Document.id] 哈希取，保证**同一本书每次都是同一个颜色**。
+  Widget _cover(
+    Document document, {
+    required double width,
+    required double height,
+    double radius = 6,
+  }) {
+    final (Color, Color, Color) palette = _coverPalette(document.id);
+    final String title = document.title.trim();
+    // 竖排：Flutter 不支持 writing-mode，逐字换行最稳（中文封面本来就是竖排）
+    final String vertical = title.isEmpty
+        ? document.type.label
+        : title.replaceAll(RegExp(r'\s+'), '').characters.take(6).join('\n');
+
+    final Widget placeholder = Container(
       width: width,
       height: height,
       decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(6),
+        borderRadius: BorderRadius.circular(radius),
         gradient: LinearGradient(
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
-          colors: <Color>[color.withAlpha(70), color.withAlpha(24)],
+          colors: <Color>[palette.$1, palette.$2, palette.$3],
         ),
       ),
-      child: Icon(icon, color: color, size: 26),
+      child: Stack(
+        children: <Widget>[
+          Positioned(
+            left: 0,
+            top: 0,
+            bottom: 0,
+            width: width * 0.12,
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.centerLeft,
+                  end: Alignment.centerRight,
+                  colors: <Color>[
+                    Colors.black.withAlpha(90),
+                    Colors.black.withAlpha(0),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          Padding(
+            padding: EdgeInsets.fromLTRB(
+                width * 0.16, height * 0.09, width * 0.1, height * 0.11),
+            child: Center(
+              child: Text(
+                vertical,
+                textAlign: TextAlign.center,
+                maxLines: 6,
+                overflow: TextOverflow.clip,
+                style: TextStyle(
+                  // 字号跟着封面宽度走：小封面（50dp）也读得出，大封面不显空
+                  fontSize: (width * 0.17).clamp(7.0, 20.0),
+                  height: 1.15,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 0.5,
+                  color: Colors.white.withAlpha(235),
+                  shadows: const <Shadow>[
+                    Shadow(blurRadius: 2, color: Color(0x66000000)),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
     );
-    if (path == null || path.isEmpty) return placeholder;
+
+    final String path = document.coverPath ?? '';
+    if (path.isEmpty) return placeholder;
     return ClipRRect(
-      borderRadius: BorderRadius.circular(6),
+      borderRadius: BorderRadius.circular(radius),
       child: Image.file(
         File(path),
         width: width,
         height: height,
         fit: BoxFit.cover,
         // 列表里只解码缩略图大小，避免大图解码造成掉帧
-        cacheWidth: 160,
-        errorBuilder: (context, error, stackTrace) => placeholder,
+        cacheWidth: (width * 2).round().clamp(120, 640),
+        errorBuilder:
+            (BuildContext context, Object error, StackTrace? stack) =>
+                placeholder,
       ),
     );
+  }
+
+  /// 封面色：按 id 稳定取一组渐变（同一本书永远同一个色）
+  static (Color, Color, Color) _coverPalette(String id) {
+    const List<(Color, Color, Color)> palettes = <(Color, Color, Color)>[
+      (Color(0xFF4A3B6B), Color(0xFF8B6FB8), Color(0xFFC3A4D9)),
+      (Color(0xFF6B2E2E), Color(0xFFA34A3C), Color(0xFFD08A6E)),
+      (Color(0xFF24405C), Color(0xFF3C6E8F), Color(0xFF7FB0C9)),
+      (Color(0xFF3A4A2E), Color(0xFF6B7F45), Color(0xFFA8B87A)),
+      (Color(0xFF4A3A2A), Color(0xFF8A6A45), Color(0xFFC6A47C)),
+      (Color(0xFF2E3A4A), Color(0xFF4A5E75), Color(0xFF8FA6BE)),
+    ];
+    final int index = id.isEmpty
+        ? 0
+        : id.codeUnits.fold<int>(0, (int a, int b) => a + b) % palettes.length;
+    return palettes[index];
   }
 }

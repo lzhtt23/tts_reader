@@ -119,6 +119,9 @@ class StorageService {
   static const String _kPdfCrops = 'pdf_crop_insets';
   /// 点正文空白处是否呼出/收起控制栏（v1.22.73，默认开）
   static const String _kTapBlankToggles = 'tap_blank_toggles_controls';
+  /// 文档库显示方式（v1.22.76）：auto / list / c2 / c3
+  static const String _kLibraryLayout = 'library_layout';
+
   /// 设置页收起了哪些分组（v1.22.74）
   static const String _kCollapsedGroups = 'settings_collapsed_groups';
   static const String _kTextRules = 'text_process_rules';
@@ -228,6 +231,19 @@ class StorageService {
   /// 朗读跳动检测（诊断系统）开关：默认关，发布包里用户看不见指示灯与导出入口。
   /// PDF 控制栏展开形态：false=胶囊（默认） true=扇形逐键展开
   final ValueNotifier<bool> pdfRadialControl = ValueNotifier<bool>(false);
+
+  /// 文档库显示方式：`auto` 按屏幕宽度自动，`list` / `c2` / `c3` 为用户手选
+  ///
+  /// 为什么留 `auto` 而不是直接存列数：平板横竖屏宽度差很大，
+  /// 存死列数会让竖屏也挤 5 列；auto 才能跟着宽度走。
+  /// 用户手选过就覆盖 auto，并一直记住（他明确表达了偏好）。
+  final ValueNotifier<String> libraryLayout = ValueNotifier<String>('auto');
+
+  Future<void> setLibraryLayout(String value) async {
+    final String v = (value == 'list' || value == 'c2' || value == 'c3') ? value : 'auto';
+    libraryLayout.value = v;
+    await (await _sp).setString(_kLibraryLayout, v);
+  }
 
   /// 设置页收起的分组 id（空 = 全部展开，默认）
   final ValueNotifier<Set<String>> collapsedSettingGroups =
@@ -494,6 +510,9 @@ class StorageService {
     tapBlankTogglesControls.value = sp.getBool(_kTapBlankToggles) ?? true;
     collapsedSettingGroups.value =
         (sp.getStringList(_kCollapsedGroups) ?? const <String>[]).toSet();
+    final String layout = sp.getString(_kLibraryLayout) ?? 'auto';
+    libraryLayout.value =
+        (layout == 'list' || layout == 'c2' || layout == 'c3') ? layout : 'auto';
     _downloadTarget = DownloadTarget.fromName(sp.getString(_kDownloadTarget));
     final folder = sp.getString(_kDownloadFolder);
     if (folder != null && folder.trim().isNotEmpty) {

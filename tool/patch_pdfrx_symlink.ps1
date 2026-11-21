@@ -62,6 +62,9 @@ $Abis = @{
 
 $pubCacheRoots = @(
   'C:\ttsbuild\pub-cache\hosted\pub.flutter-io.cn',
+  # v1.22.76：构建实际读取的是 ttsbuild 下的 pub.dev 目录（不是 flutter-io.cn）。
+  # 少了这一条就会出现「脚本说打好了、build 仍报 create symbolic link 失败」。
+  'C:\ttsbuild\pub-cache\hosted\pub.dev',
   "$env:LOCALAPPDATA\Pub\Cache\hosted\pub.dev"
 )
 # ⚠️ 本机有**两份** pub 缓存，构建实际用哪一份取决于 PUB_CACHE / 环境，

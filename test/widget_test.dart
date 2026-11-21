@@ -98,7 +98,10 @@ void main() {
     expect(find.text('文档库'), findsWidgets);
 
     // 文档库在宽屏下是多列网格，同一屏能看更多书
-    expect(find.byType(GridView), findsOneWidget);
+    //
+    // v1.22.76：列表区从 GridView 换成 CustomScrollView + SliverGrid
+    //（顶部要放「继续朗读」卡与显示选择器），所以断言改成 SliverGrid。
+    expect(find.byType(SliverGrid), findsOneWidget);
     expect(find.text('示例文档'), findsOneWidget);
 
     // 侧边栏切到设置：懒加载仍然成立

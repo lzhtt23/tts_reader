@@ -15,14 +15,15 @@ import 'pdf_reading_page.dart';
 /// 逐字符盒决定（见 `features/pdf_reading/pdf_text_layer.dart`），
 /// 而文本模式是 Flutter 自己排版、位置由 widget 决定。
 /// 混在一个页面里就要来回换算，正是之前那批「点句时灵时不灵」的根源。
-Widget openReadingScreen(Document document) {
+Widget openReadingScreen(Document document, {bool autoSpeak = false}) {
   if (document.type == DocumentType.pdf) {
     return PdfReadingPage(
       filePath: document.path,
       title: document.title,
       // 传库里的 id：会话用它判「同一本书重进」，从而保留朗读位置
       documentId: document.id,
+      autoSpeak: autoSpeak,
     );
   }
-  return ReaderPage(document: document);
+  return ReaderPage(document: document, autoSpeak: autoSpeak);
 }

@@ -141,9 +141,20 @@ class _ParagraphBlock extends _Block {
 /// PDF：按原版式单页翻页显示，朗读进度到哪一页视图就跟到哪一页（可暂停跟随）；
 /// TXT / EPUB：正文惰性渲染，按句 / 章 / 页朗读并高亮，跟随滚动只在必要时发生。
 class ReaderPage extends StatefulWidget {
-  const ReaderPage({super.key, required this.document, this.startAt});
+  const ReaderPage({
+    super.key,
+    required this.document,
+    this.startAt,
+    this.autoSpeak = false,
+  });
 
   final Document document;
+
+  /// 打开后**直接开始朗读**（文档库「继续朗读」卡用，v1.22.76）
+  ///
+  /// 与 [startAt] 配合：位置先恢复到上次那一句，然后从那里读。
+  /// 默认 false —— 从书库正常点开一本书仍然只是"打开"，不会自己出声。
+  final bool autoSpeak;
 
   /// 打开后从这个游标开始（书签跳转 / 继续阅读用）
   final (int, int, int)? startAt;
@@ -731,6 +742,18 @@ class _ReaderPageState extends State<ReaderPage> {
       await _tts.setGranularity(ReadGranularity.sentence);
       _buildLayout(finalDoc, start);
 
+      // 文档库「继续朗读」进来：位置恢复完就直接开读（v1.22.76）
+      //
+      // 必须**排在下面那个"拦截自动朗读"之后**注册：addPostFrameCallback 按注册
+      // 顺序执行，先让它把"打开文档自己播"按下去，我们这一次才是用户明确要的朗读。
+      if (widget.autoSpeak) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          final spot = _lastSpot;
+          CrashLog.mark('位置[进入即读] docId=${widget.document.id} spot=$spot');
+          _tts.speakFrom(spot.$1, spot.$2, spot.$3);
+        });
+      }
       // 拦截「打开文档自己开始朗读」（放在下一帧：让上面那套状态回推先跑完）
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
