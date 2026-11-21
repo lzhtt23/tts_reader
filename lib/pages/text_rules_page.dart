@@ -3,6 +3,8 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../models/text_rule.dart';
+import '../models/text_rule_presets.dart';
+import '../services/crash_log.dart';
 import '../services/text_processor.dart';
 
 /// 朗读文本预处理规则页（对应 T2S 的 Text Process Rules）
@@ -12,6 +14,9 @@ import '../services/text_processor.dart';
 /// 页面顶部有预览框：改完立刻能看到样例文本被改成了什么样。
 class TextRulesPage extends StatefulWidget {
   const TextRulesPage({super.key});
+
+  /// 预设库入口（用例据此点开面板）
+  static const Key presetLibraryKey = ValueKey<String>('text-rules-preset-library');
 
   /// 预览用的默认样例（覆盖内置预设会命中的几种情况）
   static const String defaultSample = '地球上最大的洋是太平洋[1]。△ 表示三角形，→ 表示方向。\n'
@@ -73,6 +78,172 @@ class _TextRulesPageState extends State<TextRulesPage> {
     );
   }
 
+  /// 打开预设库：按组列出候选规则，勾选后一次性加入（v1.22.75）
+  ///
+  /// 为什么做成"勾选面板"而不是"一键全加"：页码/页眉这类规则只对某些书成立，
+  /// 无条件全开会把正文里的年份、编号一起删掉。让用户看着说明挑。
+  Future<void> _openPresetLibrary() async {
+    final Set<String> picked = <String>{};
+    final int added = await showModalBottomSheet<int>(
+          context: context,
+          isScrollControlled: true,
+          showDragHandle: true,
+          builder: (BuildContext ctx) {
+            return StatefulBuilder(
+              builder: (BuildContext ctx, StateSetter setSheet) {
+                final ThemeData theme = Theme.of(ctx);
+                return SafeArea(
+                  child: ConstrainedBox(
+                    constraints: BoxConstraints(
+                      maxHeight: MediaQuery.sizeOf(ctx).height * 0.85,
+                    ),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: <Widget>[
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: <Widget>[
+                              Text('预设库',
+                                  style: theme.textTheme.titleMedium),
+                              const SizedBox(height: 4),
+                              Text(
+                                '按你的书挑。页码、页眉这类规则只对部分书成立 —— '
+                                '勾之前看一眼说明，加错了可以随时删。',
+                                style: theme.textTheme.bodySmall,
+                              ),
+                            ],
+                          ),
+                        ),
+                        const Divider(height: 1),
+                        Flexible(
+                          child: ListView(
+                            padding: const EdgeInsets.fromLTRB(8, 8, 8, 8),
+                            children: <Widget>[
+                              for (final String group
+                                  in TextRulePreset.groups) ...<Widget>[
+                                Padding(
+                                  padding:
+                                      const EdgeInsets.fromLTRB(8, 12, 8, 4),
+                                  child: Text(
+                                    group,
+                                    style:
+                                        theme.textTheme.labelLarge?.copyWith(
+                                      color: theme.colorScheme.primary,
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                ),
+                                for (final TextRulePreset preset
+                                    in TextRulePreset.ofGroup(group))
+                                  _presetTile(
+                                    ctx,
+                                    preset,
+                                    picked: picked,
+                                    onChanged: (bool? on) {
+                                      setSheet(() {
+                                        if (on == true) {
+                                          picked.add(preset.id);
+                                        } else {
+                                          picked.remove(preset.id);
+                                        }
+                                      });
+                                    },
+                                  ),
+                              ],
+                            ],
+                          ),
+                        ),
+                        const Divider(height: 1),
+                        Padding(
+                          padding: const EdgeInsets.all(12),
+                          child: Row(
+                            children: <Widget>[
+                              Expanded(
+                                child: Text(
+                                  picked.isEmpty
+                                      ? '还没选任何规则'
+                                      : '已选 ${picked.length} 条',
+                                  style: theme.textTheme.bodySmall,
+                                ),
+                              ),
+                              FilledButton(
+                                onPressed: picked.isEmpty
+                                    ? null
+                                    : () => Navigator.of(ctx).pop(picked.length),
+                                child: const Text('添加'),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                );
+              },
+            );
+          },
+        ) ??
+        0;
+    if (added == 0 || !mounted) return;
+    final List<TextRulePreset> chosen = picked
+        .map(TextRulePreset.byId)
+        .whereType<TextRulePreset>()
+        .toList();
+    final int real = await TextProcessor.instance.addPresets(chosen);
+    CrashLog.mark('预设库[添加] ${chosen.map((TextRulePreset p) => p.id).join(",")} '
+        '→ 实际新增 $real 条');
+    if (!mounted) return;
+    setState(() {});
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          real == 0 ? '这些规则已经在了' : '已添加 $real 条规则（下面预览能看到效果）',
+        ),
+      ),
+    );
+  }
+
+  /// 预设库里的一行：已添加的显示成不可勾选
+  Widget _presetTile(
+    BuildContext ctx,
+    TextRulePreset preset, {
+    required Set<String> picked,
+    required ValueChanged<bool?> onChanged,
+  }) {
+    final ThemeData theme = Theme.of(ctx);
+    final bool already = TextProcessor.instance.hasPreset(preset.id);
+    return CheckboxListTile(
+      key: ValueKey<String>('preset-${preset.id}'),
+      dense: true,
+      value: already || picked.contains(preset.id),
+      // 已经在表里的不让再勾（再勾也没意义，addPresets 会跳过）
+      onChanged: already ? null : onChanged,
+      title: Row(
+        children: <Widget>[
+          Flexible(child: Text(preset.name)),
+          if (preset.cautious) ...<Widget>[
+            const SizedBox(width: 6),
+            Tooltip(
+              message: '可能影响正文，建议先预览',
+              child: Icon(Icons.warning_amber_rounded,
+                  size: 16, color: theme.colorScheme.error),
+            ),
+          ],
+          if (already) ...<Widget>[
+            const SizedBox(width: 6),
+            Text('已添加',
+                style: theme.textTheme.labelSmall
+                    ?.copyWith(color: theme.colorScheme.outline)),
+          ],
+        ],
+      ),
+      subtitle: Text(preset.hint, style: theme.textTheme.bodySmall),
+      controlAffinity: ListTileControlAffinity.leading,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -85,6 +256,12 @@ class _TextRulesPageState extends State<TextRulesPage> {
       appBar: AppBar(
         title: const Text('朗读文本预处理'),
         actions: <Widget>[
+          IconButton(
+            key: TextRulesPage.presetLibraryKey,
+            tooltip: '预设库（页眉页脚 / 页码 / 注释）',
+            icon: const Icon(Icons.library_add_check_outlined),
+            onPressed: () => unawaited(_openPresetLibrary()),
+          ),
           IconButton(
             tooltip: '恢复内置预设',
             icon: const Icon(Icons.settings_backup_restore),

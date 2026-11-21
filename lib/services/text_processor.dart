@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 
 import '../models/text_rule.dart';
+import '../models/text_rule_presets.dart';
 import 'storage_service.dart';
 
 /// 朗读文本预处理：把规则表应用到「即将送去合成」的文本上
@@ -95,6 +96,31 @@ class TextProcessor {
     final builtin = rules.where((rule) => rule.builtin).toList();
     final custom = rules.where((rule) => !rule.builtin).toList();
     await setRules(<TextRule>[...builtin, ...custom]);
+  }
+
+  /// 已经把某条预设加进来了吗（面板据此显示「已添加」）
+  bool hasPreset(String presetId) =>
+      _rules.any((TextRule r) => r.id == 'preset.$presetId');
+
+  /// 从预设库批量添加（v1.22.75）
+  ///
+  /// 已经在表里的跳过（按 `preset.<id>` 判重），所以「再点一次」是安全的。
+  /// 返回真正新增的条数。
+  Future<int> addPresets(List<TextRulePreset> presets) async {
+    final Set<String> existing =
+        _rules.map((TextRule r) => r.id).toSet();
+    final List<TextRule> added = <TextRule>[];
+    for (final TextRulePreset preset in presets) {
+      final TextRule rule = preset.toRule();
+      if (existing.contains(rule.id)) continue;
+      // 正则编不过的预设不进来（目录是我们的，编不过就是我们的 bug，
+      // 但绝不能让一条坏规则进到用户表里把朗读搞坏）
+      if (validate(rule) != null) continue;
+      added.add(rule);
+    }
+    if (added.isEmpty) return 0;
+    await setRules(<TextRule>[..._rules, ...added]);
+    return added.length;
   }
 
   /// 按顺序应用全部启用规则；任何单条规则出错都只跳过它，绝不影响朗读
