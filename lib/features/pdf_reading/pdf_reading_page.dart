@@ -472,6 +472,7 @@ class PdfReadingPageState extends State<PdfReadingPage>
   @override
   void initState() {
     super.initState();
+    _crop = StorageService.instance.pdfCrop(widget.documentId ?? widget.filePath);
     // 150ms 后还没准备好 → 亮出骨架屏（快的话永远不亮，不闪）
     _openSplashTimer = Timer(const Duration(milliseconds: 150), () {
       if (!mounted || _document != null) return;
@@ -613,6 +614,212 @@ class PdfReadingPageState extends State<PdfReadingPage>
       // `forceCenter: true`：无视死区，因为后台期间位置差得可能很远
       centerOnSentence(ref, force: true, forceCenter: true);
     });
+  }
+
+  /// 裁边设置（v1.22.71）：四边内缩比例；null = 不裁
+  ({double left, double top, double right, double bottom})? _crop;
+
+  /// 裁边面板（v1.22.71）
+  ///
+  /// 为什么要给「自动检测」：用户只想「白边少占屏幕」，
+  /// 让他为每本书拖四根滑杆是不现实的。自动检测用**本页文字层的包围盒**推算，
+  /// 扫描件没有文字层时退化为「只给滑杆」，并在面板里说清楚。
+  Future<void> _openCropSheet() async {
+    final PdfDocument? doc = _document;
+    if (doc == null) return;
+    final String id = widget.documentId ?? widget.filePath;
+    final int pageIndex = (_session.current?.pageIndex ?? 0).clamp(0, doc.pages.length - 1);
+
+    ({double left, double top, double right, double bottom})? draft = _crop;
+
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (BuildContext ctx) {
+        return StatefulBuilder(
+          builder: (BuildContext ctx, StateSetter setSheet) {
+            final double l = draft?.left ?? 0;
+            final double t = draft?.top ?? 0;
+            final double r = draft?.right ?? 0;
+            final double b = draft?.bottom ?? 0;
+
+            void update({
+              double? left,
+              double? top,
+              double? right,
+              double? bottom,
+            }) {
+              final double nl = (left ?? l).clamp(0.0, 0.3);
+              final double nt = (top ?? t).clamp(0.0, 0.3);
+              final double nr = (right ?? r).clamp(0.0, 0.3);
+              final double nb = (bottom ?? b).clamp(0.0, 0.3);
+              setSheet(() {
+                draft = <double>[nl, nt, nr, nb].every((double v) => v <= 0.001)
+                    ? null
+                    : (left: nl, top: nt, right: nr, bottom: nb);
+              });
+              // 实时预览：立刻作用到页面（不写盘，点「完成」才保存）
+              setState(() => _crop = draft);
+            }
+
+            Widget slider(String label, double value, ValueChanged<double> onChanged) {
+              return Row(
+                children: <Widget>[
+                  SizedBox(width: 64, child: Text(label)),
+                  Expanded(
+                    child: Slider(
+                      value: value,
+                      max: 0.3,
+                      divisions: 30,
+                      label: '${(value * 100).round()}%',
+                      onChanged: onChanged,
+                    ),
+                  ),
+                  SizedBox(
+                    width: 44,
+                    child: Text('${(value * 100).round()}%',
+                        style: const TextStyle(fontSize: 12)),
+                  ),
+                ],
+              );
+            }
+
+            return SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: <Widget>[
+                    Text('裁边', style: Theme.of(ctx).textTheme.titleMedium),
+                    const SizedBox(height: 4),
+                    Text(
+                      '裁掉白边，正文能更大。设置只对这一本书生效。',
+                      style: Theme.of(ctx).textTheme.bodySmall,
+                    ),
+                    const SizedBox(height: 8),
+                    slider('左', l, (double v) => update(left: v)),
+                    slider('上', t, (double v) => update(top: v)),
+                    slider('右', r, (double v) => update(right: v)),
+                    slider('下', b, (double v) => update(bottom: v)),
+                    const SizedBox(height: 8),
+                    Row(
+                      children: <Widget>[
+                        OutlinedButton.icon(
+                          onPressed: () {
+                            CrashLog.mark('PDF[裁边] 点了自动检测 page=${pageIndex + 1}');
+                            final detected = _detectCrop(doc, pageIndex);
+                            if (detected == null) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                  content: Text('这一页没有文字层（可能是扫描件），无法自动检测；请手动拖滑杆'),
+                                ),
+                              );
+                              return;
+                            }
+                            draft = detected;
+                            setSheet(() {});
+                            setState(() => _crop = draft);
+                          },
+                          icon: const Icon(Icons.auto_fix_high, size: 18),
+                          label: const Text('自动检测'),
+                        ),
+                        const SizedBox(width: 8),
+                        OutlinedButton.icon(
+                          onPressed: () {
+                            draft = null;
+                            setSheet(() {});
+                            setState(() => _crop = null);
+                          },
+                          icon: const Icon(Icons.restart_alt, size: 18),
+                          label: const Text('重置'),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    Row(
+                      children: <Widget>[
+                        Expanded(
+                          child: FilledButton(
+                            onPressed: () async {
+                              final current = draft;
+                              if (current == null) {
+                                await StorageService.instance.clearPdfCrop(id);
+                              } else {
+                                await StorageService.instance.setPdfCrop(
+                                  id,
+                                  left: current.left,
+                                  top: current.top,
+                                  right: current.right,
+                                  bottom: current.bottom,
+                                );
+                              }
+                              CrashLog.mark('PDF[裁边] doc=$id '
+                                  '${current == null ? "已重置" : "左${(current.left * 100).round()}% 上${(current.top * 100).round()}% 右${(current.right * 100).round()}% 下${(current.bottom * 100).round()}%"}');
+                              if (ctx.mounted) Navigator.of(ctx).pop();
+                            },
+                            child: const Text('完成'),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  /// 用当前页文字层的包围盒推算裁边（返回 null = 这页没文字层，检测不了）
+  ///
+  /// 只取**这一页**：跨页求并集会把「某页有页眉、某页没有」平均掉，
+  /// 反而让每页都裁不准。用户翻到白边最大的那页点一次即可。
+  ({double left, double top, double right, double bottom})? _detectCrop(
+    PdfDocument doc,
+    int pageIndex,
+  ) {
+    final layer = _session.layerOf(pageIndex);
+    if (layer == null || layer.lines.isEmpty) {
+      CrashLog.mark('PDF[裁边检测] 第${pageIndex + 1}页没有文本层（layer=${layer == null ? "null" : "空"}），无法检测');
+      return null;
+    }
+    final Size page = doc.pages[pageIndex].size;
+    if (page.width <= 0 || page.height <= 0) {
+      CrashLog.mark('PDF[裁边检测] 页面尺寸异常 ${page.width}x${page.height}');
+      return null;
+    }
+
+    Rect? box;
+    for (final PdfTextLine line in layer.lines) {
+      final Rect b = line.bounds;
+      if (b.width <= 0 || b.height <= 0) continue;
+      box = box == null ? b : box.expandToInclude(b);
+    }
+    if (box == null) {
+      CrashLog.mark('PDF[裁边检测] 第${pageIndex + 1}页所有行包围盒为空');
+      return null;
+    }
+
+    // 留一点余量（1.2% 页宽），别把贴着正文的标点裁掉
+    final double padX = page.width * 0.012;
+    final double padY = page.height * 0.012;
+    double l = ((box.left - padX) / page.width).clamp(0.0, 0.3);
+    double r = ((page.width - box.right - padX) / page.width).clamp(0.0, 0.3);
+    double t = ((box.top - padY) / page.height).clamp(0.0, 0.3);
+    double b = ((page.height - box.bottom - padY) / page.height).clamp(0.0, 0.3);
+    CrashLog.mark('PDF[裁边检测] 第${pageIndex + 1}页 页面=${page.width.toStringAsFixed(1)}x${page.height.toStringAsFixed(1)} '
+        '正文盒=(${box.left.toStringAsFixed(1)},${box.top.toStringAsFixed(1)})-'
+        '(${box.right.toStringAsFixed(1)},${box.bottom.toStringAsFixed(1)}) '
+        '行数=${layer.lines.length} → 左${(l * 100).toStringAsFixed(1)}% '
+        '上${(t * 100).toStringAsFixed(1)}% 右${(r * 100).toStringAsFixed(1)}% '
+        '下${(b * 100).toStringAsFixed(1)}%');
+    if (l + r >= 0.5 || t + b >= 0.5) return null; // 检测结果不合理就别用
+    if (l <= 0.002 && r <= 0.002 && t <= 0.002 && b <= 0.002) return null;
+    return (left: l, top: t, right: r, bottom: b);
   }
 
   Future<void> _open() async {
@@ -2530,6 +2737,13 @@ class PdfReadingPageState extends State<PdfReadingPage>
             icon: const Icon(Icons.list_alt),
             tooltip: '目录',
           ),
+          IconButton(
+            tooltip: '裁边',
+            onPressed: doc == null ? null : () => unawaited(_openCropSheet()),
+            icon: Icon(
+              _crop == null ? Icons.crop_free : Icons.crop,
+            ),
+          ),
         ],
       ),
       body: Stack(
@@ -2716,7 +2930,12 @@ class PdfReadingPageState extends State<PdfReadingPage>
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: <Widget>[
           AspectRatio(
-            aspectRatio: page.width / page.height,
+            // 裁边后盒子要按**裁切区**的比例给（宽乘 (1-l-r)、高乘 (1-t-b)），
+            // 否则放大后的页面会被拉扁 —— 拉伸是几何问题，改 Clip 补不回来。
+            aspectRatio: _crop == null
+                ? page.width / page.height
+                : (page.width * (1 - _crop!.left - _crop!.right)) /
+                    (page.height * (1 - _crop!.top - _crop!.bottom)),
             child: Builder(
               builder: (context) {
                 return PdfPageLayer(
@@ -2730,6 +2949,7 @@ class PdfReadingPageState extends State<PdfReadingPage>
                     Theme.of(context).colorScheme,
                   ),
                   showDebugRects: widget.debugShowTextRects,
+                  crop: _crop,
                   onReadSentence: (index) => _readSentence(pageNumber, index),
                   onExtentChanged: (extent) {
                     if (pageIndex < _pageExtents.length) {

@@ -37,6 +37,7 @@ class PdfPageLayer extends StatefulWidget {
     this.highlightColor,
     this.showDebugRects = false,
     this.onExtentChanged,
+    this.crop,
   });
 
   final PdfDocument? document;
@@ -61,6 +62,19 @@ class PdfPageLayer extends StatefulWidget {
 
   /// 打开后把每个字符盒画出来（排查命中问题用）
   final bool showDebugRects;
+
+  /// 裁边：四边各内缩多少（0~1，相对页宽 / 页高）；null = 不裁
+  ///
+  /// ## 为什么要在这里裁（而不是在阅读页缩一缩）
+  ///
+  /// 页面盒子的**长宽比**由外层 `AspectRatio` 决定（阅读页按裁后的比例给）。
+  /// 这里要做的只是「把完整页面放大到裁切区正好铺满盒子，再裁掉外面」：
+  ///   · 放大后整页宽度 = 盒宽 / (1 - 左 - 右)
+  ///   · 于是 [_rendered]（LayoutBuilder 看到的约束）就是**放大后**的尺寸，
+  ///     `_scale = rendered.width / pdfPageWidth` 自然变成放大比例 ——
+  ///     点击取句、高亮矩形全都不需要改一行坐标换算。
+  ///   · 裁剪只用 ClipRect + 位移，不改任何几何推导。
+  final ({double left, double top, double right, double bottom})? crop;
 
   /// 这一页在滚动内容里占了多高（含内边距）
   ///
@@ -257,6 +271,41 @@ class _PdfPageLayerState extends State<PdfPageLayer> {
   @override
   Widget build(BuildContext context) {
     final layer = widget.textLayer;
+    final content = _buildContent(context, layer);
+    final c = widget.crop;
+    if (c == null) return content;
+    // 裁边：先把「完整页面」按 (1/(1-l-r)) 放大，再平移到裁切区左上角，最后裁掉外面。
+    // 用 OverflowBox 让子节点拿到**放大后**的约束（这样内部 LayoutBuilder 量到的
+    // 就是放大尺寸），用 ClipRect 把超出盒子部分剪掉。
+    return LayoutBuilder(
+      builder: (BuildContext context, BoxConstraints constraints) {
+        final double boxW = constraints.maxWidth;
+        final double boxH = constraints.maxHeight;
+        if (!boxW.isFinite || !boxH.isFinite || boxW <= 0 || boxH <= 0) {
+          return content;
+        }
+        final double cropW = (1 - c.left - c.right).clamp(0.1, 1.0);
+        final double cropH = (1 - c.top - c.bottom).clamp(0.1, 1.0);
+        final double childW = boxW / cropW;
+        final double childH = boxH / cropH;
+        return ClipRect(
+          child: OverflowBox(
+            alignment: Alignment.topLeft,
+            minWidth: childW,
+            maxWidth: childW,
+            minHeight: childH,
+            maxHeight: childH,
+            child: Transform.translate(
+              offset: Offset(-c.left * childW, -c.top * childH),
+              child: content,
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildContent(BuildContext context, PdfPageTextLayer? layer) {
     return Stack(
       fit: StackFit.passthrough,
       children: <Widget>[

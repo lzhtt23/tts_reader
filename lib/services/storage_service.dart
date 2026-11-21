@@ -115,6 +115,8 @@ class StorageService {
   static const String _kAutoFormatDocs = 'reader_auto_format_docs';
   static const String _kTextModeDocs = 'reader_text_mode_docs';
   static const String _kPdfReadingSpots = 'pdf_reading_spots';
+  /// PDF 裁边（每本书各自的四边内缩比例，单位 0~1）
+  static const String _kPdfCrops = 'pdf_crop_insets';
   static const String _kTextRules = 'text_process_rules';
   static const String _kAutoSleepIdle = 'auto_sleep_idle_minutes';
   static const String _kAutoSleepStop = 'auto_sleep_stop_minutes';
@@ -387,6 +389,7 @@ class StorageService {
     _autoFormatDocs = <String>{};
     _textModeDocs = <String>{};
     _pdfReadingSpots = <String, Map<String, int>>{};
+    _pdfCrops = <String, Map<String, double>>{};
     _useDynamicColor = false;
     _backgroundImage = '';
     _backgroundImageOpacity = 0.35;
@@ -460,6 +463,7 @@ class StorageService {
     } catch (_) {
       _pdfReadingSpots = <String, Map<String, int>>{}; // 损坏不阻塞启动
     }
+    _loadPdfCrops(sp.getString(_kPdfCrops));
     _downloadTarget = DownloadTarget.fromName(sp.getString(_kDownloadTarget));
     final folder = sp.getString(_kDownloadFolder);
     if (folder != null && folder.trim().isNotEmpty) {
@@ -557,6 +561,74 @@ class StorageService {
   /// 不改动朗读游标本身的语义。
   Map<String, Map<String, int>> _pdfReadingSpots =
       <String, Map<String, int>>{};
+
+  /// PDF 裁边：每本书各自记住四边内缩比例（0~1，相对页宽/页高）
+  ///
+  /// 为什么按书存而不是全局：不同 PDF 的白边差别很大，
+  /// 一本裁 8% 刚好，换一本可能就把正文裁掉了。
+  Map<String, Map<String, double>> _pdfCrops = <String, Map<String, double>>{};
+
+  /// 取某本书的裁边；没有设置返回 null（= 不裁）
+  ({double left, double top, double right, double bottom})? pdfCrop(
+    String documentId,
+  ) {
+    final Map<String, double>? raw = _pdfCrops[documentId];
+    if (raw == null) return null;
+    final double l = raw['left'] ?? 0;
+    final double t = raw['top'] ?? 0;
+    final double r = raw['right'] ?? 0;
+    final double b = raw['bottom'] ?? 0;
+    // 四边加起来必须小于 1，否则页面被裁成负尺寸（界面上就是一片白）
+    if (l + r >= 0.9 || t + b >= 0.9) return null;
+    if (l <= 0 && t <= 0 && r <= 0 && b <= 0) return null;
+    return (left: l, top: t, right: r, bottom: b);
+  }
+
+  Future<void> setPdfCrop(
+    String documentId, {
+    required double left,
+    required double top,
+    required double right,
+    required double bottom,
+  }) async {
+    _pdfCrops[documentId] = <String, double>{
+      'left': left.clamp(0.0, 0.45),
+      'top': top.clamp(0.0, 0.45),
+      'right': right.clamp(0.0, 0.45),
+      'bottom': bottom.clamp(0.0, 0.45),
+    };
+    await _persistPdfCrops();
+  }
+
+  Future<void> clearPdfCrop(String documentId) async {
+    if (_pdfCrops.remove(documentId) == null) return;
+    await _persistPdfCrops();
+  }
+
+  Future<void> _persistPdfCrops() async {
+    await (await _sp).setString(_kPdfCrops, jsonEncode(_pdfCrops));
+  }
+
+  /// 启动时读回裁边设置（解析失败就当没设过，不阻塞启动）
+  void _loadPdfCrops(String? raw) {
+    if (raw == null || raw.isEmpty) return;
+    try {
+      final dynamic decoded = jsonDecode(raw);
+      if (decoded is! Map) return;
+      final Map<String, Map<String, double>> out = <String, Map<String, double>>{};
+      decoded.forEach((dynamic key, dynamic value) {
+        if (key is! String || value is! Map) return;
+        final Map<String, double> one = <String, double>{};
+        value.forEach((dynamic k, dynamic v) {
+          if (k is String && v is num) one[k] = v.toDouble();
+        });
+        if (one.isNotEmpty) out[key] = one;
+      });
+      _pdfCrops = out;
+    } catch (_) {
+      _pdfCrops = <String, Map<String, double>>{};
+    }
+  }
 
   /// 某文档上次朗读的位置（页下标 + 句下标，都是 0 起）；没有返回 null
   ({int pageIndex, int sentenceIndex})? pdfReadingSpot(String documentId) {
