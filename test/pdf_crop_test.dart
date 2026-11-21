@@ -8,6 +8,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:tts_reader/features/pdf_reading/pdf_page_layer.dart';
+import 'package:tts_reader/features/pdf_reading/pdf_reading_page.dart';
 import 'package:tts_reader/services/storage_service.dart';
 
 void main() {
@@ -98,6 +99,54 @@ void main() {
       // 裁边时：子节点宽度应为 box.width / (1 - 0.1 - 0.1) = 375
       final double expectedChild = box.width / (1 - crop.left - crop.right);
       expect(expectedChild, closeTo(375, 0.01));
+    });
+  });
+
+  group('多页抽样（v1.22.72）', () {
+    test('当前页 ±2 页一定被包含', () {
+      final List<int> pages = PdfReadingPageState.cropSamplePages(100, 50);
+      for (int d = -2; d <= 2; d++) {
+        expect(pages, contains(50 + d), reason: '当前页±2 必须参与，否则就近页的白边会被忽略');
+      }
+    });
+
+    test('抽样数量不超过上限', () {
+      final List<int> pages = PdfReadingPageState.cropSamplePages(500, 250);
+      expect(pages.length, lessThanOrEqualTo(PdfReadingPageState.maxCropSamplePages));
+      expect(pages.toSet().length, pages.length, reason: '抽样不能重复');
+      // 结果必须有序（日志里好读，也让并集过程稳定）
+      final List<int> sorted = List<int>.of(pages)..sort();
+      expect(pages, sorted);
+    });
+
+    test('页数很少时不越界', () {
+      expect(PdfReadingPageState.cropSamplePages(1, 0), <int>[0]);
+      for (final int i in PdfReadingPageState.cropSamplePages(3, 0)) {
+        expect(i, inInclusiveRange(0, 2));
+      }
+      expect(PdfReadingPageState.cropSamplePages(0, 0), isEmpty);
+    });
+
+    test('并集取每边最小内缩（保证任何一页都不被裁）', () {
+      final merged = PdfReadingPageState.mergeCrops(<({double left, double top, double right, double bottom})>[
+        (left: 0.12, top: 0.11, right: 0.11, bottom: 0.07),
+        (left: 0.05, top: 0.14, right: 0.08, bottom: 0.03),
+      ])!;
+      expect(merged.left, closeTo(0.05, 1e-9));
+      expect(merged.top, closeTo(0.11, 1e-9));
+      expect(merged.right, closeTo(0.08, 1e-9));
+      expect(merged.bottom, closeTo(0.03, 1e-9));
+    });
+
+    test('合并结果不合理时返回 null（不许把正文裁光）', () {
+      expect(
+        PdfReadingPageState.mergeCrops(<({double left, double top, double right, double bottom})>[
+          (left: 0.45, top: 0, right: 0.45, bottom: 0),
+        ]),
+        isNull,
+      );
+      expect(PdfReadingPageState.mergeCrops(<({double left, double top, double right, double bottom})>[]),
+          isNull);
     });
   });
 

@@ -737,6 +737,16 @@ class PdfReadingPageState extends State<PdfReadingPage>
                         ),
                       ],
                     ),
+                    if (_lastCropSampleCount > 0)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 6),
+                        child: Text(
+                          '已参考 $_lastCropSampleCount 页（取并集，宁可少裁也不裁掉正文）',
+                          style: Theme.of(ctx).textTheme.bodySmall?.copyWith(
+                                color: Theme.of(ctx).colorScheme.outline,
+                              ),
+                        ),
+                      ),
                     const SizedBox(height: 12),
                     Row(
                       children: <Widget>[
@@ -778,20 +788,70 @@ class PdfReadingPageState extends State<PdfReadingPage>
   ///
   /// 只取**这一页**：跨页求并集会把「某页有页眉、某页没有」平均掉，
   /// 反而让每页都裁不准。用户翻到白边最大的那页点一次即可。
-  ({double left, double top, double right, double bottom})? _detectCrop(
+  /// 裁边检测要看的页：当前页 ±2 + 全书均匀 5 页，去重后最多 [maxCropSamplePages] 页
+  ///
+  /// 为什么要抽样：只按当前页算，遇到「这页恰好没页眉」就会把别的页的页眉裁掉；
+  /// 反过来遇到「这页有页脚」又会裁得太少。多看几页取**并集**才稳。
+  ///
+  /// 纯函数（@visibleForTesting）：页码逻辑单独可测，不用起 PDF。
+  @visibleForTesting
+  static List<int> cropSamplePages(int pageCount, int current) {
+    if (pageCount <= 0) return const <int>[];
+    final Set<int> out = <int>{};
+    for (int d = -2; d <= 2; d++) {
+      final int i = current + d;
+      if (i >= 0 && i < pageCount) out.add(i);
+    }
+    // 全书均匀取 5 页（跳过首末各 1 页：封面/封底常没有正文）
+    final int from = pageCount > 4 ? 1 : 0;
+    final int to = pageCount > 4 ? pageCount - 2 : pageCount - 1;
+    final int span = to - from;
+    if (span > 0) {
+      for (int k = 0; k < 5; k++) {
+        final int i = from + (span * k / 4).round();
+        if (i >= 0 && i < pageCount) out.add(i);
+      }
+    }
+    final List<int> list = out.toList()..sort();
+    if (list.length <= maxCropSamplePages) return list;
+    return list.take(maxCropSamplePages).toList();
+  }
+
+  /// 抽样上限：再多也不会更准，只会变慢
+  static const int maxCropSamplePages = 10;
+
+  /// 多页结果取「并集」：每一边都取**最小内缩**，保证任何一页的正文都不被裁
+  ///
+  /// 纯函数，单独可测。空列表返回 null。
+  @visibleForTesting
+  static ({double left, double top, double right, double bottom})? mergeCrops(
+    List<({double left, double top, double right, double bottom})> items,
+  ) {
+    if (items.isEmpty) return null;
+    double l = items.first.left;
+    double t = items.first.top;
+    double r = items.first.right;
+    double b = items.first.bottom;
+    for (final c in items.skip(1)) {
+      if (c.left < l) l = c.left;
+      if (c.top < t) t = c.top;
+      if (c.right < r) r = c.right;
+      if (c.bottom < b) b = c.bottom;
+    }
+    if (l + r >= 0.5 || t + b >= 0.5) return null;
+    if (l <= 0.002 && r <= 0.002 && t <= 0.002 && b <= 0.002) return null;
+    return (left: l, top: t, right: r, bottom: b);
+  }
+
+  /// 单页检测（内部用）：只算这一页的正文包围盒 → 四边内缩比例
+  ({double left, double top, double right, double bottom})? _detectCropOnePage(
     PdfDocument doc,
     int pageIndex,
   ) {
     final layer = _session.layerOf(pageIndex);
-    if (layer == null || layer.lines.isEmpty) {
-      CrashLog.mark('PDF[裁边检测] 第${pageIndex + 1}页没有文本层（layer=${layer == null ? "null" : "空"}），无法检测');
-      return null;
-    }
+    if (layer == null || layer.lines.isEmpty) return null;
     final Size page = doc.pages[pageIndex].size;
-    if (page.width <= 0 || page.height <= 0) {
-      CrashLog.mark('PDF[裁边检测] 页面尺寸异常 ${page.width}x${page.height}');
-      return null;
-    }
+    if (page.width <= 0 || page.height <= 0) return null;
 
     Rect? box;
     for (final PdfTextLine line in layer.lines) {
@@ -799,28 +859,57 @@ class PdfReadingPageState extends State<PdfReadingPage>
       if (b.width <= 0 || b.height <= 0) continue;
       box = box == null ? b : box.expandToInclude(b);
     }
-    if (box == null) {
-      CrashLog.mark('PDF[裁边检测] 第${pageIndex + 1}页所有行包围盒为空');
-      return null;
-    }
+    if (box == null) return null;
 
     // 留一点余量（1.2% 页宽），别把贴着正文的标点裁掉
     final double padX = page.width * 0.012;
     final double padY = page.height * 0.012;
-    double l = ((box.left - padX) / page.width).clamp(0.0, 0.3);
-    double r = ((page.width - box.right - padX) / page.width).clamp(0.0, 0.3);
-    double t = ((box.top - padY) / page.height).clamp(0.0, 0.3);
-    double b = ((page.height - box.bottom - padY) / page.height).clamp(0.0, 0.3);
-    CrashLog.mark('PDF[裁边检测] 第${pageIndex + 1}页 页面=${page.width.toStringAsFixed(1)}x${page.height.toStringAsFixed(1)} '
-        '正文盒=(${box.left.toStringAsFixed(1)},${box.top.toStringAsFixed(1)})-'
-        '(${box.right.toStringAsFixed(1)},${box.bottom.toStringAsFixed(1)}) '
-        '行数=${layer.lines.length} → 左${(l * 100).toStringAsFixed(1)}% '
-        '上${(t * 100).toStringAsFixed(1)}% 右${(r * 100).toStringAsFixed(1)}% '
-        '下${(b * 100).toStringAsFixed(1)}%');
-    if (l + r >= 0.5 || t + b >= 0.5) return null; // 检测结果不合理就别用
-    if (l <= 0.002 && r <= 0.002 && t <= 0.002 && b <= 0.002) return null;
+    final double l = ((box.left - padX) / page.width).clamp(0.0, 0.3);
+    final double r = ((page.width - box.right - padX) / page.width).clamp(0.0, 0.3);
+    final double t = ((box.top - padY) / page.height).clamp(0.0, 0.3);
+    final double b = ((page.height - box.bottom - padY) / page.height).clamp(0.0, 0.3);
     return (left: l, top: t, right: r, bottom: b);
   }
+
+  /// 自动检测：抽样多页取并集（v1.22.72）
+  ///
+  /// 只对**已经有文本层缓存**的页参与（`layerOf` 命中），不为了检测去抽页 ——
+  /// 抽页要读文件，会让「点一下自动检测」卡住好几秒。
+  /// 拿不到任何一页时明确提示，让用户手动拖。
+  ({double left, double top, double right, double bottom})? _detectCrop(
+    PdfDocument doc,
+    int pageIndex,
+  ) {
+    final List<int> pages = cropSamplePages(doc.pages.length, pageIndex);
+    final List<({double left, double top, double right, double bottom})> hits =
+        <({double left, double top, double right, double bottom})>[];
+    final List<int> usedPages = <int>[];
+    for (final int i in pages) {
+      final one = _detectCropOnePage(doc, i);
+      if (one == null) continue;
+      hits.add(one);
+      usedPages.add(i + 1);
+    }
+    _lastCropSampleCount = hits.length;
+    if (hits.isEmpty) {
+      CrashLog.mark('PDF[裁边检测] 抽了 ${pages.length} 页，没有一页有文本层缓存 → 只能手动调');
+      return null;
+    }
+    final merged = mergeCrops(hits);
+    if (merged == null) {
+      CrashLog.mark('PDF[裁边检测] 参考 ${hits.length} 页，合并结果不合理，放弃');
+      return null;
+    }
+    CrashLog.mark('PDF[裁边检测] 参考 ${hits.length} 页（第 ${usedPages.join(",")} 页）'
+        ' → 左${(merged.left * 100).toStringAsFixed(1)}% '
+        '上${(merged.top * 100).toStringAsFixed(1)}% '
+        '右${(merged.right * 100).toStringAsFixed(1)}% '
+        '下${(merged.bottom * 100).toStringAsFixed(1)}%');
+    return merged;
+  }
+
+  /// 上次自动检测参考了几页（面板上显示，让用户知道这个值有多可信）
+  int _lastCropSampleCount = 0;
 
   Future<void> _open() async {
     // ★v1.22.24 计时（走 logcat 的 flutter 行，真机直接量，不用导日志）
