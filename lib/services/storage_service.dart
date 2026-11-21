@@ -119,6 +119,8 @@ class StorageService {
   static const String _kPdfCrops = 'pdf_crop_insets';
   /// 点正文空白处是否呼出/收起控制栏（v1.22.73，默认开）
   static const String _kTapBlankToggles = 'tap_blank_toggles_controls';
+  /// 设置页收起了哪些分组（v1.22.74）
+  static const String _kCollapsedGroups = 'settings_collapsed_groups';
   static const String _kTextRules = 'text_process_rules';
   static const String _kAutoSleepIdle = 'auto_sleep_idle_minutes';
   static const String _kAutoSleepStop = 'auto_sleep_stop_minutes';
@@ -226,6 +228,21 @@ class StorageService {
   /// 朗读跳动检测（诊断系统）开关：默认关，发布包里用户看不见指示灯与导出入口。
   /// PDF 控制栏展开形态：false=胶囊（默认） true=扇形逐键展开
   final ValueNotifier<bool> pdfRadialControl = ValueNotifier<bool>(false);
+
+  /// 设置页收起的分组 id（空 = 全部展开，默认）
+  final ValueNotifier<Set<String>> collapsedSettingGroups =
+      ValueNotifier<Set<String>>(<String>{});
+
+  Future<void> setSettingGroupCollapsed(String id, bool collapsed) async {
+    final Set<String> next = Set<String>.of(collapsedSettingGroups.value);
+    if (collapsed) {
+      next.add(id);
+    } else {
+      next.remove(id);
+    }
+    collapsedSettingGroups.value = next;
+    await (await _sp).setStringList(_kCollapsedGroups, next.toList());
+  }
 
   /// 点正文空白处呼出/收起控制栏（默认开）
   final ValueNotifier<bool> tapBlankTogglesControls = ValueNotifier<bool>(true);
@@ -475,6 +492,8 @@ class StorageService {
     }
     _loadPdfCrops(sp.getString(_kPdfCrops));
     tapBlankTogglesControls.value = sp.getBool(_kTapBlankToggles) ?? true;
+    collapsedSettingGroups.value =
+        (sp.getStringList(_kCollapsedGroups) ?? const <String>[]).toSet();
     _downloadTarget = DownloadTarget.fromName(sp.getString(_kDownloadTarget));
     final folder = sp.getString(_kDownloadFolder);
     if (folder != null && folder.trim().isNotEmpty) {

@@ -185,30 +185,116 @@ class _SettingsPageState extends State<SettingsPage> {
       child: ListView(
         padding: const EdgeInsets.fromLTRB(12, 8, 12, 96),
         children: <Widget>[
-          _themeCard(),
-          _appIconCard(),
-          _readerStyleCard(),
-          _mediaInterruptCard(),
-          _readingInteractionCard(),
-          _engineCard(tts),
-          _voiceCard(tts),
-          _audioCard(tts, rate, pitch),
-          _textProcessCard(),
-          _autoSleepCard(),
-          _c2sCard(),
-          _keepAliveCard(),
-          _downloadCard(),
-          _backupCard(),
-          _speechDiagCard(),
-          _bookSourcesCard(),
-          _legadoSourcesCard(),
-          _browseCard(),
-          _tipsCard(tts),
-          _diagnosticsCard(),
+          // ★v1.22.74：按主题分组折叠。
+          //
+          // 为什么这样做：设置页已经二十来张卡、要翻五六屏。分组后
+          // 「常改的」一屏内能看完，「很少动的」收起来不占地方。
+          //
+          // 默认**全部展开**（对老用户零变化），收起的组会记住 ——
+          // 用户自己折一次，以后就一直是折的。这样既解决「翻很久」，
+          // 又不会让既有的界面用例（默认要找得到各个卡）失效。
+          _settingsGroup('appearance', '外观', Icons.palette_outlined, <Widget Function()>[
+            _themeCard,
+            _appIconCard,
+          ]),
+          _settingsGroup('reading', '阅读与排版', Icons.menu_book_outlined, <Widget Function()>[
+            _readerStyleCard,
+            _readingInteractionCard,
+          ]),
+          _settingsGroup('speech', '朗读与语音', Icons.record_voice_over_outlined, <Widget Function()>[
+            _mediaInterruptCard,
+            () => _engineCard(tts),
+            () => _voiceCard(tts),
+            () => _audioCard(tts, rate, pitch),
+            _textProcessCard,
+          ]),
+          _settingsGroup('background', '后台与省电', Icons.battery_saver_outlined, <Widget Function()>[
+            _autoSleepCard,
+            _c2sCard,
+            _keepAliveCard,
+          ]),
+          _settingsGroup('network', '网络与来源', Icons.lan_outlined, <Widget Function()>[
+            _downloadCard,
+            _bookSourcesCard,
+            _legadoSourcesCard,
+            _browseCard,
+          ]),
+          _settingsGroup('data', '数据与诊断', Icons.storage_outlined, <Widget Function()>[
+            _backupCard,
+            _speechDiagCard,
+            () => _tipsCard(tts),
+            _diagnosticsCard,
+          ]),
           // ★项目主页放在**最底部、居中**（用户要求：诊断日志提示的下方）
           _projectEntry(),
         ],
       ),
+    );
+  }
+
+  /// 一个可折叠的设置分组（v1.22.74）
+  ///
+  /// [builders] 用闭包而不是直接传 Widget：收起的组**不构建**里面的卡片，
+  /// 省掉无谓的 widget 对象分配（也避免收起时仍在跑里面的 ValueListenableBuilder）。
+  Widget _settingsGroup(
+    String id,
+    String title,
+    IconData icon,
+    List<Widget Function()> builders,
+  ) {
+    final storage = StorageService.instance;
+    return ValueListenableBuilder<Set<String>>(
+      valueListenable: storage.collapsedSettingGroups,
+      builder: (BuildContext context, Set<String> collapsedSet, Widget? _) {
+        final bool collapsed = collapsedSet.contains(id);
+        final ColorScheme scheme = Theme.of(context).colorScheme;
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: <Widget>[
+            InkWell(
+              // 用例按 id 定位分组标题（'外观' 这类文字在卡片里也可能出现，按文字找会撞）
+              key: ValueKey<String>('settings-group-$id'),
+              borderRadius: BorderRadius.circular(10),
+              onTap: () =>
+                  unawaited(storage.setSettingGroupCollapsed(id, !collapsed)),
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(8, 14, 8, 6),
+                child: Row(
+                  children: <Widget>[
+                    Icon(icon, size: 18, color: scheme.primary),
+                    const SizedBox(width: 8),
+                    Text(
+                      title,
+                      style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                            color: scheme.primary,
+                            fontWeight: FontWeight.w600,
+                          ),
+                    ),
+                    if (collapsed) ...<Widget>[
+                      const SizedBox(width: 8),
+                      Text(
+                        '已收起 ${builders.length} 项',
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                              color: scheme.outline,
+                            ),
+                      ),
+                    ],
+                    const Spacer(),
+                    AnimatedRotation(
+                      turns: collapsed ? -0.25 : 0,
+                      duration: const Duration(milliseconds: 150),
+                      child: Icon(Icons.expand_more,
+                          size: 20, color: scheme.outline),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            if (!collapsed)
+              for (final Widget Function() build in builders) build(),
+          ],
+        );
+      },
     );
   }
 
