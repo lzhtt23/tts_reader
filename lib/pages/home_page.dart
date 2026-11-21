@@ -19,6 +19,7 @@ import '../services/online_book_downloader.dart';
 import '../services/source_client.dart';
 import '../services/speak_intake.dart';
 import '../services/storage_service.dart';
+import 'lan_upload_page.dart';
 import '../tts/tts_manager.dart';
 import '../widgets/adaptive.dart';
 import '../widgets/tutorial_dialog.dart';
@@ -322,6 +323,21 @@ class _HomePageState extends State<HomePage> {
   }
 
   /// 导入本地 PDF / EPUB / TXT：只登记元数据，正文在打开时后台解析
+  /// 局域网传书：手机起 HTTP 服务，电脑浏览器拖文件进来（v1.22.70）
+  Future<void> _openLanUpload() async {
+    final int? imported = await Navigator.of(context).push<int>(
+      MaterialPageRoute<int>(builder: (_) => const LanUploadPage()),
+    );
+    if (!mounted || imported == null || imported <= 0) return;
+    // 传进来的书直接进库：清掉搜索过滤并重新读一遍，避免用户以为没收到
+    if (_search.text.isNotEmpty) _search.clear();
+    await _load();
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('已从电脑接收 $imported 本书')),
+    );
+  }
+
   Future<void> _import() async {
     final result = await FilePicker.platform.pickFiles(
       type: FileType.custom,
@@ -657,6 +673,11 @@ class _HomePageState extends State<HomePage> {
               tooltip: '排序：${_sort.label}',
               onPressed: () => setState(() => _sort = _sort.next),
               icon: Icon(_sort.icon),
+            ),
+            IconButton(
+              tooltip: '局域网传书',
+              onPressed: _openLanUpload,
+              icon: const Icon(Icons.wifi_tethering),
             ),
             IconButton(
               tooltip: '刷新',
