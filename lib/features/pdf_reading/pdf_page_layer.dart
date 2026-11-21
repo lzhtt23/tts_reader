@@ -33,6 +33,7 @@ class PdfPageLayer extends StatefulWidget {
     required this.pageNumber,
     required this.textLayer,
     this.onReadSentence,
+    this.onBlankTap,
     this.highlightSentence,
     this.highlightColor,
     this.showDebugRects = false,
@@ -48,6 +49,12 @@ class PdfPageLayer extends StatefulWidget {
 
   /// 点击某一句时回调（下标对应 [textLayer].sentences）
   final void Function(int sentenceIndex)? onReadSentence;
+
+  /// 点在**空白处**（页边距、行间空隙、没有文字层的区域）时回调（v1.22.73）
+  ///
+  /// 用途：呼出/收起控制栏。命中了句子就**不会**走这里 ——
+  /// 点句朗读永远优先，空白处才是兜底。
+  final VoidCallback? onBlankTap;
 
   /// 正在朗读的高亮：**要画的那一句在本页的句索引**；null 表示本页没有高亮
   ///
@@ -210,13 +217,21 @@ class _PdfPageLayerState extends State<PdfPageLayer> {
   void _handleTap(Offset localPosition) {
     final layer = widget.textLayer;
     final onRead = widget.onReadSentence;
-    if (layer == null || onRead == null) return;
+    if (layer == null || onRead == null) {
+      // 没有文字层（扫描件）：整页都是"空白"，点一下就切控制栏
+      widget.onBlankTap?.call();
+      return;
+    }
     final scale = _scale;
     if (scale <= 0) return;
     // 屏幕逻辑像素 → PDF 点
     final pagePoint = Offset(localPosition.dx / scale, localPosition.dy / scale);
     final index = layer.sentenceIndexAt(pagePoint);
-    if (index == null) return;
+    if (index == null) {
+      // 没命中任何句子 → 交给"空白处"处理（呼出/收起控制栏）
+      widget.onBlankTap?.call();
+      return;
+    }
     onRead(index);
   }
 

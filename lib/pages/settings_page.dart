@@ -189,6 +189,7 @@ class _SettingsPageState extends State<SettingsPage> {
           _appIconCard(),
           _readerStyleCard(),
           _mediaInterruptCard(),
+          _readingInteractionCard(),
           _engineCard(tts),
           _voiceCard(tts),
           _audioCard(tts, rate, pitch),
@@ -478,6 +479,34 @@ class _SettingsPageState extends State<SettingsPage> {
   // ---------------- 音频打断与耳机控制 ----------------
 
   /// 让其它媒体打断我们 + 耳机按键接到朗读上
+  /// 阅读交互小卡（v1.22.73）
+  ///
+  /// 为什么单独一张卡、而且**放在耳机卡之后**：把它塞进「阅读排版」卡会让
+  /// 后面所有卡片下移，既有用例 `scrollUntilVisible` 落点随之变化，
+  /// 点击会落到导航栏上（实测踩到）。放在最后，前面卡片位置一个字节都不动。
+  Widget _readingInteractionCard() {
+    final storage = StorageService.instance;
+    return Card.filled(
+      margin: const EdgeInsets.only(bottom: 12),
+      child: ValueListenableBuilder<bool>(
+        valueListenable: storage.tapBlankTogglesControls,
+        builder: (BuildContext context, bool on, Widget? _) {
+          return SwitchListTile(
+            value: on,
+            onChanged: (bool v) =>
+                unawaited(storage.setTapBlankTogglesControls(v)),
+            secondary: const Icon(Icons.touch_app_outlined),
+            title: const Text('点空白处呼出控制栏'),
+            subtitle: const Text(
+              '点正文以外的空白（页边距等）显示或收起控制栏。'
+              '点句子仍然是「从这句开始读」，两者不冲突。',
+            ),
+          );
+        },
+      ),
+    );
+  }
+
   Widget _mediaInterruptCard() {
     final storage = StorageService.instance;
     return Card.filled(

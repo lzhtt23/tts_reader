@@ -254,6 +254,9 @@ class _ReaderPageState extends State<ReaderPage> {
 
   /// 翻页闸门：一次翻页动画没结束就不再发新的，避免「一句话一次连续翻页」
   bool _pageTurning = false;
+
+  /// 正文区总宽（含两侧页边距），判断「点是否落在空白处」用（v1.22.73）
+  double _pageAreaWidth = 0;
   Timer? _pageTurnSettle;
 
   /// 最近一次翻页落地的时间
@@ -2224,6 +2227,29 @@ class _ReaderPageState extends State<ReaderPage> {
   // ---------------- 文本正文 ----------------
 
   /// 阅读区：原版式 PDF 直接给视图，其余走正文；自定义阅读底色包在最外层
+  /// 这个 x 是否落在正文栏之外（= 页边距空白）
+  ///
+  /// 判据用**布局时量到的真实宽度**，不写死数字：
+  /// 正文栏限宽居中，两侧剩下的就是空白。
+  bool _isInPageMargin(double x) {
+    if (_pageAreaWidth <= 0) return false;
+    final double content = _pageViewportWidth <= 0 ? _pageAreaWidth : _pageViewportWidth;
+    final double margin = (_pageAreaWidth - content) / 2;
+    if (margin < 8) return false; // 没有真正的空白区（窄屏正文铺满）
+    return x < margin || x > _pageAreaWidth - margin;
+  }
+
+  /// 点正文空白处：切换控制栏展开/收起（v1.22.73）
+  ///
+  /// 只切 UI，**不动朗读**：用户要的是「把控件叫出来」，不是开始/停止朗读。
+  void _toggleControlsByBlankTap() {
+    if (!mounted) return;
+    // 用户可能不想要这个反应（点边距本来什么都不该发生）
+    if (!StorageService.instance.tapBlankTogglesControls.value) return;
+    if (_doc == null || _doc!.chapters.isEmpty) return;
+    setState(() => _controlCollapsed = !_controlCollapsed);
+  }
+
   Widget _readingArea((int, int, int)? cursor) {
     final child = _isPdf && !_pdfTextView ? _pdfView() : _content(cursor);
     final background = _style.background;
@@ -2263,6 +2289,7 @@ class _ReaderPageState extends State<ReaderPage> {
         LayoutBuilder(
           builder: (context, constraints) {
             // 文字栏宽（量句子/换行估算都用它，必须与页内实际栏宽一致）
+            _pageAreaWidth = constraints.maxWidth;
             _pageViewportWidth = math.min(
               constraints.maxWidth,
               readerMaxContentWidth(context),
@@ -2282,7 +2309,19 @@ class _ReaderPageState extends State<ReaderPage> {
               // 判据：手指移动超过 `kTouchSlop` 才算「拖」；只是点一下不算。
               onPointerDown: _onPagePointerDown,
               onPointerMove: _onPagePointerMove,
-              onPointerUp: (_) => _pagePointerDragged = false,
+              onPointerUp: (PointerUpEvent e) {
+                final bool dragged = _pagePointerDragged;
+                _pagePointerDragged = false;
+                // 点**页边距**（正文栏以外的空白）→ 呼出/收起控制栏（v1.22.73）。
+                //
+                // 为什么不用 GestureDetector 包在 PageView 外面：`Scrollable` 的
+                // 命中行为是 opaque，实测点击到不了外层（用例里连着两次没触发）。
+                // 在这里判断是**确定的**：位置已知，且只在没拖动时生效，
+                // 不会和「点句朗读」「滑动翻页」抢手势。
+                if (!dragged && _isInPageMargin(e.localPosition.dx)) {
+                  _toggleControlsByBlankTap();
+                }
+              },
               onPointerCancel: (_) => _pagePointerDragged = false,
               child: PageView.builder(
                 key: ReaderPage.pageViewKey,

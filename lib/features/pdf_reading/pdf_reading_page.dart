@@ -911,6 +911,17 @@ class PdfReadingPageState extends State<PdfReadingPage>
   /// 上次自动检测参考了几页（面板上显示，让用户知道这个值有多可信）
   int _lastCropSampleCount = 0;
 
+  /// 点正文空白处：切换控制栏展开/收起（v1.22.73）
+  ///
+  /// 只有一个动作、不碰朗读状态 —— 用户明确要求「点空白只是把控件叫出来」。
+  void _toggleControlsByBlankTap() {
+    if (!mounted) return;
+    // 用户可能不想要这个反应（点边距本来什么都不该发生）
+    if (!StorageService.instance.tapBlankTogglesControls.value) return;
+    setState(() => _controlCollapsed = !_controlCollapsed);
+    CrashLog.mark('PDF[点空白] 控制栏 → ${_controlCollapsed ? "收起" : "展开"}');
+  }
+
   Future<void> _open() async {
     // ★v1.22.24 计时（走 logcat 的 flutter 行，真机直接量，不用导日志）
     final Stopwatch sw = Stopwatch()..start();
@@ -3040,6 +3051,8 @@ class PdfReadingPageState extends State<PdfReadingPage>
                   showDebugRects: widget.debugShowTextRects,
                   crop: _crop,
                   onReadSentence: (index) => _readSentence(pageNumber, index),
+                  // 点空白处（页边距/行间/扫描件整页）→ 呼出或收起控制栏（v1.22.73）
+                  onBlankTap: _toggleControlsByBlankTap,
                   onExtentChanged: (extent) {
                     if (pageIndex < _pageExtents.length) {
                       // ★★★ v1.22.62 找到根因了：**上报的是页面高，滚动用的是页块高**

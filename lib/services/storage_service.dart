@@ -117,6 +117,8 @@ class StorageService {
   static const String _kPdfReadingSpots = 'pdf_reading_spots';
   /// PDF 裁边（每本书各自的四边内缩比例，单位 0~1）
   static const String _kPdfCrops = 'pdf_crop_insets';
+  /// 点正文空白处是否呼出/收起控制栏（v1.22.73，默认开）
+  static const String _kTapBlankToggles = 'tap_blank_toggles_controls';
   static const String _kTextRules = 'text_process_rules';
   static const String _kAutoSleepIdle = 'auto_sleep_idle_minutes';
   static const String _kAutoSleepStop = 'auto_sleep_stop_minutes';
@@ -224,6 +226,14 @@ class StorageService {
   /// 朗读跳动检测（诊断系统）开关：默认关，发布包里用户看不见指示灯与导出入口。
   /// PDF 控制栏展开形态：false=胶囊（默认） true=扇形逐键展开
   final ValueNotifier<bool> pdfRadialControl = ValueNotifier<bool>(false);
+
+  /// 点正文空白处呼出/收起控制栏（默认开）
+  final ValueNotifier<bool> tapBlankTogglesControls = ValueNotifier<bool>(true);
+
+  Future<void> setTapBlankTogglesControls(bool value) async {
+    tapBlankTogglesControls.value = value;
+    await (await _sp).setBool(_kTapBlankToggles, value);
+  }
 
   /// 耳机键兼容模式：true=用静音音轨兜底媒体键路由（会有一声"啪"）
   final ValueNotifier<bool> mediaButtonCompat = ValueNotifier<bool>(false);
@@ -464,6 +474,7 @@ class StorageService {
       _pdfReadingSpots = <String, Map<String, int>>{}; // 损坏不阻塞启动
     }
     _loadPdfCrops(sp.getString(_kPdfCrops));
+    tapBlankTogglesControls.value = sp.getBool(_kTapBlankToggles) ?? true;
     _downloadTarget = DownloadTarget.fromName(sp.getString(_kDownloadTarget));
     final folder = sp.getString(_kDownloadFolder);
     if (folder != null && folder.trim().isNotEmpty) {
