@@ -187,6 +187,7 @@ class LibraryBackup {
         spots[doc.id] = <String, int>{
           'page': spot.pageIndex,
           'sentence': spot.sentenceIndex,
+          if (spot.pageCount != null) 'pages': spot.pageCount!,
         };
       }
     }
@@ -358,11 +359,13 @@ class LibraryBackup {
       if (spot is! Map) continue;
       final int page = (spot['page'] as num?)?.toInt() ?? -1;
       final int sentence = (spot['sentence'] as num?)?.toInt() ?? -1;
+      final int? pages = (spot['pages'] as num?)?.toInt();
       if (page < 0 || sentence < 0) continue;
       await StorageService.instance.setPdfReadingSpot(
         id,
         pageIndex: page,
         sentenceIndex: sentence,
+        pageCount: (pages != null && pages > 0) ? pages : null,
       );
     }
 

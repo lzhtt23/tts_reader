@@ -340,6 +340,7 @@ class PdfReadSession extends ChangeNotifier implements AudioSessionSource {
         doc,
         pageIndex: ref.pageIndex,
         sentenceIndex: ref.sentenceIndex,
+        pageCount: _pageCount > 0 ? _pageCount : null,
       );
       // 位置记忆埋点 F（PDF 写盘）：真正落盘的位置
       // v1.21.19 补 `当前=$_current`：用来抓「写的是不是过期 ref」

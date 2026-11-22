@@ -498,6 +498,10 @@ class StorageService {
                 if (value['page'] is num) 'page': (value['page'] as num).toInt(),
                 if (value['sentence'] is num)
                   'sentence': (value['sentence'] as num).toInt(),
+                // v1.22.78：总页数也要一起还原 —— 漏了这一条，
+                // 重启后就会显示「第 15 页」而不是「15 / 319 页」
+                //（内存里写进去过，但下次启动被这里的白名单过滤掉）。
+                if (value['pages'] is num) 'pages': (value['pages'] as num).toInt(),
               },
             );
           });
@@ -680,7 +684,12 @@ class StorageService {
   }
 
   /// 某文档上次朗读的位置（页下标 + 句下标，都是 0 起）；没有返回 null
-  ({int pageIndex, int sentenceIndex})? pdfReadingSpot(String documentId) {
+  ///
+  /// [pageCount] 是本 PDF 的总页数（v1.22.78 起一起存）：文档库要显示
+  /// 「读到 12/319 页」就必须知道总数，而它不该为了这个去解析一遍 PDF。
+  ({int pageIndex, int sentenceIndex, int? pageCount})? pdfReadingSpot(
+    String documentId,
+  ) {
     final spot = _pdfReadingSpots[documentId];
     if (spot == null) return null;
     final page = spot['page'];
@@ -688,18 +697,26 @@ class StorageService {
     if (page == null || sentence == null || page < 0 || sentence < 0) {
       return null;
     }
-    return (pageIndex: page, sentenceIndex: sentence);
+    final pages = spot['pages'];
+    return (
+      pageIndex: page,
+      sentenceIndex: sentence,
+      pageCount: (pages != null && pages > 0) ? pages : null,
+    );
   }
 
   Future<void> setPdfReadingSpot(
     String documentId, {
     required int pageIndex,
     required int sentenceIndex,
+    int? pageCount,
   }) async {
-    _pdfReadingSpots[documentId] = <String, int>{
+    final Map<String, int> entry = <String, int>{
       'page': pageIndex,
       'sentence': sentenceIndex,
     };
+    if (pageCount != null && pageCount > 0) entry['pages'] = pageCount;
+    _pdfReadingSpots[documentId] = entry;
     await (await _sp).setString(_kPdfReadingSpots, jsonEncode(
       _pdfReadingSpots.map(
         (key, value) => MapEntry<String, dynamic>(key, value),

@@ -1324,6 +1324,32 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
+  /// 这本书「读到哪里」的统一口径（v1.22.78）
+  ///
+  /// PDF 的进度存在 `pdfReadingSpots`（按 documentId 的页/句），
+  /// 而 `Document.progress` 那条字段 PDF 从来不用 —— 直接用 progress 显示
+  /// 就会出现「明明读到第 12 页，列表写 0%」。这里折算一次，全页共用。
+  ({String text, double value}) _readingProgress(Document document) {
+    if (document.type == DocumentType.pdf) {
+      final spot = StorageService.instance.pdfReadingSpot(document.id);
+      if (spot != null) {
+        final int page = spot.pageIndex + 1; // 内部 0 起，显示 1 起
+        final int? total = spot.pageCount;
+        if (total != null && total > 0) {
+          final double v = (page / total).clamp(0.0, 1.0);
+          // 不带动词：调用处自己拼（续读卡是"上次读到 · 14 / 319 页"，
+          // 列表行是"PDF · 14 / 319 页"），否则会出现"读到 · 读到"重复。
+          return (text: '$page / $total 页', value: v);
+        }
+        return (text: '第 $page 页', value: 0);
+      }
+    }
+    return (
+      text: '进度 ${(document.progress * 100).round()}%',
+      value: document.progress,
+    );
+  }
+
   /// 「继续朗读」卡：最近读过、且没读完的那本（v1.22.76）
   ///
   /// 为什么值得占首屏一块：文档库最高频的动作就是「接着上次读」，
@@ -1340,7 +1366,7 @@ class _HomePageState extends State<HomePage> {
     final Document doc = target;
     final ThemeData theme = Theme.of(context);
     final ColorScheme scheme = theme.colorScheme;
-    final int pct = (doc.progress * 100).round();
+    final ({String text, double value}) read = _readingProgress(doc);
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(12, 4, 12, 12),
@@ -1371,8 +1397,8 @@ class _HomePageState extends State<HomePage> {
                       ),
                       const SizedBox(height: 3),
                       Text(
-                        // 进度 0 的书说"上次读到"别扭（其实还没读）——按实际状态换措辞
-                        '${pct == 0 ? '上次打开' : '上次读到 · 进度 $pct%'}'
+                        // 进度为 0 的书说"上次读到"别扭（其实还没读）——按实际状态换措辞
+                        '${read.value > 0 ? '上次读到 · ${read.text}' : '上次打开'}'
                         ' · ${_relativeTime(doc.lastReadAt!)}',
                         style: theme.textTheme.bodySmall
                             ?.copyWith(color: scheme.onSurfaceVariant),
@@ -1450,7 +1476,10 @@ class _HomePageState extends State<HomePage> {
   Widget _listRow(Document document) {
     final ThemeData theme = Theme.of(context);
     final ColorScheme scheme = theme.colorScheme;
-    final int pct = (document.progress * 100).round();
+    final ({String text, double value}) read = _readingProgress(document);
+    final String pctLabel = read.value <= 0
+        ? ''
+        : '${(read.value * 100).round()}%';
     return Padding(
       padding: const EdgeInsets.only(bottom: 8),
       child: Material(
@@ -1487,7 +1516,7 @@ class _HomePageState extends State<HomePage> {
                       ),
                       const SizedBox(height: 2),
                       Text(
-                        '${document.type.label} · 进度 $pct%'
+                        '${document.type.label} · ${read.text}'
                         '${document.lastReadAt == null ? '' : ' · ${_relativeTime(document.lastReadAt!)}'}',
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
@@ -1501,7 +1530,7 @@ class _HomePageState extends State<HomePage> {
                             child: ClipRRect(
                               borderRadius: BorderRadius.circular(2),
                               child: LinearProgressIndicator(
-                                value: document.progress,
+                                value: read.value,
                                 minHeight: 3,
                                 backgroundColor: scheme.outlineVariant,
                               ),
@@ -1509,7 +1538,7 @@ class _HomePageState extends State<HomePage> {
                           ),
                           const SizedBox(width: 7),
                           Text(
-                            '$pct%',
+                            pctLabel,
                             style: theme.textTheme.labelSmall?.copyWith(
                               color: scheme.onSurfaceVariant,
                               fontFeatures: const <FontFeature>[
@@ -1535,7 +1564,7 @@ class _HomePageState extends State<HomePage> {
   Widget _gridCard(Document document) {
     final ThemeData theme = Theme.of(context);
     final ColorScheme scheme = theme.colorScheme;
-    final int pct = (document.progress * 100).round();
+    final ({String text, double value}) read = _readingProgress(document);
     return LayoutBuilder(
       builder: (BuildContext context, BoxConstraints constraints) {
         final double w = constraints.maxWidth;
@@ -1577,7 +1606,7 @@ class _HomePageState extends State<HomePage> {
                         child: ClipRRect(
                           borderRadius: BorderRadius.circular(2),
                           child: LinearProgressIndicator(
-                            value: document.progress,
+                            value: read.value,
                             minHeight: 3,
                             backgroundColor: scheme.outlineVariant,
                           ),
@@ -1585,7 +1614,7 @@ class _HomePageState extends State<HomePage> {
                       ),
                       const SizedBox(width: 5),
                       Text(
-                        '$pct%',
+                        read.value <= 0 ? '' : '${(read.value * 100).round()}%',
                         style: theme.textTheme.labelSmall?.copyWith(
                           fontSize: 9,
                           color: scheme.onSurfaceVariant,
