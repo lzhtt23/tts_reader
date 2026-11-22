@@ -1350,10 +1350,54 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  /// 「继续朗读」卡：最近读过、且没读完的那本（v1.22.76）
+  /// 这本书此刻是不是**正在朗读**（v1.22.79）
   ///
-  /// 为什么值得占首屏一块：文档库最高频的动作就是「接着上次读」，
-  /// 而书一多就得靠找。没有符合条件的书时整块不渲染（不占位）。
+  /// 文字档看 `TtsManager`，PDF 看 `PdfReadSession`（两套会话）。
+  /// 返回 `(是否是当前书, 是否正在出声)`。
+  ({bool active, bool playing}) _playingStateOf(Document document) {
+    final TtsManager tts = TtsManager.instance;
+    final PdfReadSession pdf = PdfReadSession.instance;
+    final bool pdfIsDoc = pdf.documentId == document.id;
+    final bool ttsIsDoc = tts.activeDocumentId == document.id;
+
+    // ⚠️ 判据必须和右下角迷你条**完全一致**，否则就会出现"迷你条有暂停、
+    // 续读卡也有播放"这种重复。
+    // 迷你条的条件是：PDF `isPlaybackActive`；文字档 `hasSession && !endedByStop`
+    //（见 `ReadingControlBar._pickSource`）—— 它不看是否真的在出声，
+    // 因为"会话在、只是暂停"时迷你条照样显示（那是暂停键）。
+    final bool active = (pdfIsDoc && pdf.isPlaybackActive) ||
+        (ttsIsDoc && tts.hasSession && !tts.endedByStop);
+    if (!active) return (active: false, playing: false);
+    final bool playing = (pdfIsDoc && pdf.isPlaying && !pdf.isPaused) ||
+        (ttsIsDoc && tts.playing);
+    return (active: true, playing: playing);
+  }
+
+  /// 此刻是否有**任何**朗读在进行（文字档或 PDF）
+  ///
+  /// 续读卡的播放键只在"这本书没在读"时出现；如果读的是**别的**书，
+  /// 点下去会把朗读切过来，所以 tooltip 要说明白。
+  bool _anyPlaybackActive() {
+    final TtsManager tts = TtsManager.instance;
+    if (tts.hasSession && !tts.endedByStop) return true;
+    return PdfReadSession.instance.isPlaybackActive;
+  }
+
+  /// 「继续朗读」卡：最近读过的那本（v1.22.76 / v1.22.79 修分工）
+  ///
+  /// ## 和右下角迷你条的分工（用户 2026-11-22 要求「互补」）
+  ///
+  /// 原来这里和迷你条**都能播放同一本书**：
+  /// 书正在读的时候，迷你条有暂停，续读卡又有一个"播"——两个控件抢同一个动作，
+  /// 而且点续读卡那个会**重开阅读页**，把正在进行的朗读打断。
+  ///
+  /// 现在的分工：
+  /// · **播放 / 暂停只有迷你条一个入口**（它本来就常驻在文档库右下角）；
+  /// · 续读卡只管「选书 + 进入」：
+  ///   - 这本书**没在朗读** → 播放键 = 打开并开始朗读（不会重开已在读的那本）
+  ///   - 这本书**正在朗读** → 按钮变成「进入阅读页」，只导航、不碰音频
+  ///
+  /// 这样同一本书在文档库里永远只有一处能"开始/停止声音"。
   Widget _resumeCard() {
     Document? target;
     for (final Document d in _documents) {
@@ -1368,58 +1412,85 @@ class _HomePageState extends State<HomePage> {
     final ColorScheme scheme = theme.colorScheme;
     final ({String text, double value}) read = _readingProgress(doc);
 
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 4, 12, 12),
-      child: Material(
-        key: HomePage.resumeCardKey,
-        color: scheme.surfaceContainerLow,
-        borderRadius: BorderRadius.circular(18),
-        clipBehavior: Clip.antiAlias,
-        child: InkWell(
-          onTap: () => _open(doc),
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
-            child: Row(
-              children: <Widget>[
-                _cover(doc, width: 44, height: 58),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
-                    children: <Widget>[
-                      Text(
-                        doc.title,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: theme.textTheme.titleSmall
-                            ?.copyWith(fontWeight: FontWeight.w600),
+    // 朗读状态会持续变化（播放/暂停/换书），卡片要跟着重建
+    return ListenableBuilder(
+      listenable: Listenable.merge(<Listenable>[
+        TtsManager.instance,
+        PdfReadSession.instance,
+      ]),
+      builder: (BuildContext context, Widget? _) {
+        final ({bool active, bool playing}) state = _playingStateOf(doc);
+        return Padding(
+          padding: const EdgeInsets.fromLTRB(12, 4, 12, 12),
+          child: Material(
+            key: HomePage.resumeCardKey,
+            color: scheme.surfaceContainerLow,
+            borderRadius: BorderRadius.circular(18),
+            clipBehavior: Clip.antiAlias,
+            child: InkWell(
+              onTap: () => _open(doc),
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+                child: Row(
+                  children: <Widget>[
+                    _cover(doc, width: 44, height: 58),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: <Widget>[
+                          Text(
+                            doc.title,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: theme.textTheme.titleSmall
+                                ?.copyWith(fontWeight: FontWeight.w600),
+                          ),
+                          const SizedBox(height: 3),
+                          Text(
+                            // 正在读这本书时，状态写在这里（不另加按钮）——
+                            // 播放/暂停归迷你条，进入阅读页靠点整卡，避免重复入口
+                            '${state.active ? (state.playing ? '正在朗读' : '已暂停') : (read.value > 0 ? '上次读到 · ${read.text}' : '上次打开')}'
+                            ' · ${_relativeTime(doc.lastReadAt!)}',
+                            style: theme.textTheme.bodySmall?.copyWith(
+                              color: state.active
+                                  ? scheme.primary
+                                  : scheme.onSurfaceVariant,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ],
                       ),
-                      const SizedBox(height: 3),
-                      Text(
-                        // 进度为 0 的书说"上次读到"别扭（其实还没读）——按实际状态换措辞
-                        '${read.value > 0 ? '上次读到 · ${read.text}' : '上次打开'}'
-                        ' · ${_relativeTime(doc.lastReadAt!)}',
-                        style: theme.textTheme.bodySmall
-                            ?.copyWith(color: scheme.onSurfaceVariant),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
+                    ),
+                    const SizedBox(width: 8),
+                    if (state.active)
+                      // 正在读这本书：**不放按钮**。
+                      // 播放/暂停由右下角迷你条独占；进入阅读页点整卡即可。
+                      // 放个按钮（哪怕是"进入"）就等于同一本书有两个入口，
+                      // 正是用户说的"两个控件操作重复"。
+                      Padding(
+                        padding: const EdgeInsets.only(right: 8),
+                        child: Icon(Icons.graphic_eq,
+                            size: 22, color: scheme.primary),
+                      )
+                    else
+                      IconButton.filled(
+                        // 读的是别的书时说清楚"点下去会切换"
+                        tooltip: _anyPlaybackActive()
+                            ? '继续朗读（会切换正在朗读的书）'
+                            : '继续朗读',
+                        onPressed: () => _openAndSpeak(doc),
+                        icon: const Icon(Icons.play_arrow),
                       ),
-                    ],
-                  ),
+                  ],
                 ),
-                const SizedBox(width: 8),
-                // 直接开读：相当于"点开这本书并开始朗读"
-                IconButton.filled(
-                  tooltip: '继续朗读',
-                  onPressed: () => _openAndSpeak(doc),
-                  icon: const Icon(Icons.play_arrow),
-                ),
-              ],
+              ),
             ),
           ),
-        ),
-      ),
+        );
+      },
     );
   }
 
