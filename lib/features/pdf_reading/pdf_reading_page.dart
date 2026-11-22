@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:pdfrx/pdfrx.dart';
 
+import '../../models/document.dart';
 import '../../models/reader_style.dart';
 import '../../models/structured_document.dart';
 import '../../services/crash_log.dart';
@@ -929,6 +930,25 @@ class PdfReadingPageState extends State<PdfReadingPage>
     CrashLog.mark('PDF[点空白] 控制栏 → ${_controlCollapsed ? "收起" : "展开"}');
   }
 
+  /// 记一次「最近阅读」（v1.22.77）
+  ///
+  /// 只更新 `lastReadAt`，不动 `progress`：PDF 的阅读进度由
+  /// `pdfReadingSpots`（按 documentId 独立落盘）负责，两套口径别混。
+  Future<void> _touchLastRead() async {
+    final String? id = widget.documentId;
+    if (id == null || id.isEmpty) return;
+    try {
+      final List<Document> all = await StorageService.instance.loadDocuments();
+      final int at = all.indexWhere((Document d) => d.id == id);
+      if (at < 0) return;
+      await StorageService.instance.upsertDocument(
+        all[at].copyWith(lastReadAt: DateTime.now()),
+      );
+    } catch (e) {
+      CrashLog.mark('PDF[最近阅读] 写回失败：$e');
+    }
+  }
+
   Future<void> _open() async {
     // ★v1.22.24 计时（走 logcat 的 flutter 行，真机直接量，不用导日志）
     final Stopwatch sw = Stopwatch()..start();
@@ -952,19 +972,6 @@ class PdfReadingPageState extends State<PdfReadingPage>
           ..clear()
           ..addAll(List<double>.filled(pageCount, 0));
       });
-      // 「继续朗读」进来：位置恢复完后接着读（v1.22.76）
-      if (widget.autoSpeak) {
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (!mounted) return;
-          final session = _session;
-          if (!session.isActive) {
-            CrashLog.mark('PDF[进入即读] 会话未就绪，跳过自动朗读');
-            return;
-          }
-          CrashLog.mark('PDF[进入即读] resume');
-          session.resume();
-        });
-      }
       // 闸门补上真实页数（initState 时文档还没打开，只能给 0；
       // pageCount<=0 会把每一次滚动请求静默吞掉 —— §4.100 任务 C），
       // 并按会话已有位置认下初始页（重进时「已在目标页」不该再翻一次）。
@@ -1003,6 +1010,44 @@ class PdfReadingPageState extends State<PdfReadingPage>
       );
       stage('session-open');
       if (!mounted) return;
+      // ★v1.22.77：**把「最近阅读」写回文档库**。
+      //
+      // 这是用户报「继续朗读卡不支持 PDF」的根因之一：
+      // 文字档在 `ReaderPage._persistProgress` 里会写 `lastReadAt`，
+      // 而 PDF 这条路**从来不写** —— 于是续读卡永远选不到任何 PDF
+      //（它按 lastReadAt 找最近阅读的那本），用户自然以为"PDF 不支持继续播放"。
+      //
+      // 语义上这里记的是「最近打开过这本 PDF」：排序与续读卡都用它。
+      unawaited(_touchLastRead());
+      // ★v1.22.77：「继续朗读」进来时**必须等到这里**才能开读。
+      //
+      // 为什么不能挂在 `_open()` 开头那一帧：`open()` 里恢复 `_current` 是在
+      // `await ensureLayer(...)` **之后**，之前 `_current` 还是 null；
+      // `resume()` 内部 `if (ref == null || !isActive) return;` 会**静默返回**，
+      // 表现就是用户报的「继续朗读卡对 PDF 不起作用」。
+      if (widget.autoSpeak) {
+        PdfSentenceRef? ref = _session.current;
+        if (ref == null) {
+          // 只"打开过"但没朗读过的 PDF 没有落盘位置。点播放键总该有反应，
+          // 所以退回**第一页第一句**（扫描件那页没文字层就再往后找一页）。
+          for (int i = 0; i < pageCount && i < 3; i++) {
+            final layer = await _session.ensureLayer(i);
+            if (layer != null && layer.sentences.isNotEmpty) {
+              ref = sentenceRefAt(i, 0, layer);
+              break;
+            }
+          }
+          if (!mounted) return;
+          CrashLog.mark('PDF[进入即读] 无历史位置 → 退回首句 ${ref?.pageIndex}/${ref?.sentenceIndex}');
+        }
+        if (ref == null) {
+          CrashLog.mark('PDF[进入即读] 前几页都没有文字层，无法自动朗读');
+        } else {
+          final PdfSentenceRef target = ref;
+          CrashLog.mark('PDF[进入即读] 开读 ${target.pageIndex}/${target.sentenceIndex}');
+          _session.startAt(target);
+        }
+      }
       // ★★ v1.21.43 · 第 4 步：**恢复之后**再对齐一次闸门（单一真相源 = _session.current）
       //
       // 上面 `resetForDocument`（在 `open()` 之前）拿到的是**恢复之前**的页码；
